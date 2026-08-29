@@ -12,6 +12,7 @@
     "@distube/yt-dlp": "^2.0.1",
     "discord.js": "^14.14.0",
     "distube": "^5.2.3",
+    "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "ffmpeg-static": "^5.3.0",
     "opusscript": "^0.0.8"
