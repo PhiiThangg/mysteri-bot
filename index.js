@@ -376,7 +376,7 @@ client.on("messageCreate", async (message) => {
         return;
     }
 
-    if (!message.content.startsWith(PREFIX)) return;
+    if (!message.content.startsWith(prefix)) return;
 
     const args = message.content.slice(prefix.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
