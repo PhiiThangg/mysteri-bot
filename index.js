@@ -34,7 +34,7 @@ const chokidar = require("chokidar");
 const { Octokit } = require("@octokit/rest");
 
 const TOKEN = process.env.TOKEN;
-const PREFIX = (process.env.PREFIX || "h").replace(/^!/, "").trim() || "h";
+const prefix = (process.env.prefix || "h").replace(/^!/, "").trim() || "h";
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
