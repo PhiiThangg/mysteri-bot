@@ -448,6 +448,12 @@ client.on("messageCreate", async (message) => {
     // ===== KICK =====
     if (command === "kick") {
 
+              if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers))
+            return tempReply(
+                message,
+                `❌ Bạn không có quyền để sử dụng lệnh này!\n\n📌 Quyền hạn: Kick thành viên (kick).`
+            );
+
         const member = message.mentions.members.first();
 
         if (!member)
