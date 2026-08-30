@@ -1212,8 +1212,9 @@ else if (command === "role") {
             .setTimestamp();
 
         message.reply({ embeds: [embed] });
-
-     if (durationMs > 0) {
+        
+// Xử lý tự động gỡ role nếu có thiết lập thời gian (Temp Role)
+        if (durationMs > 0) {
             setTimeout(async () => {
                 try {
                     // Fetch lại member để đảm bảo dữ liệu mới nhất
@@ -1239,7 +1240,7 @@ else if (command === "role") {
                     console.error("[TEMP ROLE EXPIRED ERROR]", err);
                 }
             }, durationMs);
-    
+        }
 
     } catch (error) {
         console.error("[ROLE ERROR]", error);
