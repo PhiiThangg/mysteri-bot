@@ -1110,7 +1110,9 @@ else if (command === "role") {
 
     // Tìm role theo tên
     const roleToModify = message.guild.roles.cache.find(
-        role => role.name.toLowerCase() === roleQuery.toLowerCase()
+        role => 
+            role.name.toLowerCase().startsWith(roleQuery.toLowerCase()) || 
+            role.name.toLowerCase().includes(roleQuery.toLowerCase())
     );
 
     if (!roleToModify) {
@@ -1118,7 +1120,7 @@ else if (command === "role") {
             .setColor("#ff0000")
             .setTitle("❌ Không tìm thấy role")
             .setDescription(
-                `Không tìm thấy role có tên **${roleQuery}**!`
+                `Không tìm thấy role nào phù hợp với **${roleQuery}**!`
             );
 
         return message.reply({ embeds: [errEmbed] });
