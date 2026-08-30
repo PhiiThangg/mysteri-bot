@@ -1252,6 +1252,333 @@ else if (command === "role") {
     }
 }
 
+// ===== AUTO RESPONDER =====
+
+// Dữ liệu AutoRes lưu trong bộ nhớ
+const autoResData = {};
+
+// Chuẩn hóa trigger
+function normalizeAutoResTrigger(text) {
+    return text
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, " ");
+}
+
+// ===== AR ADD / A =====
+if (command === "ar" || command === "autoresponder") {
+
+    const action = (args.shift() || "").toLowerCase();
+
+    // ===== AR A / AR ADD =====
+    if (action === "a" || action === "add") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Không có quyền")
+                        .setDescription(
+                            "Bạn không có quyền quản lý AutoResponder!\n\n" +
+                            "📌 Cần quyền **Manage Server**."
+                        )
+                ]
+            });
+        }
+
+        const fullText = args.join(" ");
+        const separatorIndex = fullText.indexOf("|");
+
+        let trigger;
+        let content = "";
+
+        if (separatorIndex !== -1) {
+            trigger = fullText.slice(0, separatorIndex).trim();
+            content = fullText.slice(separatorIndex + 1).trim();
+        } else {
+            trigger = fullText.trim();
+        }
+
+        // Bỏ dấu "..." nếu người dùng nhập trigger trong dấu ngoặc
+        trigger = trigger.replace(/^["']|["']$/g, "").trim();
+
+        if (!trigger) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Thiếu trigger")
+                        .setDescription(
+                            `Dùng:\n` +
+                            `\`${prefix}ar a "trigger" | nội dung\`\n\n` +
+                            `Hoặc:\n` +
+                            `\`${prefix}autoresponder add "trigger" | nội dung\``
+                        )
+                ]
+            });
+        }
+
+        const key = normalizeAutoResTrigger(trigger);
+        const guildId = message.guild.id;
+
+        if (!autoResData[guildId]) {
+            autoResData[guildId] = {};
+        }
+
+        if (autoResData[guildId][key]) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("⚠️ Trigger đã tồn tại")
+                        .setDescription(
+                            `Trigger **${trigger}** đã được tạo trước đó.`
+                        )
+                ]
+            });
+        }
+
+        autoResData[guildId][key] = {
+            trigger: trigger,
+            content: content,
+            image: null,
+            enabled: true
+        };
+
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setTitle("✅ Tạo AutoResponder thành công")
+            .setDescription(
+                `Đã tạo trigger **${trigger}**.`
+            )
+            .addFields(
+                {
+                    name: "💬 Trigger",
+                    value: trigger,
+                    inline: true
+                },
+                {
+                    name: "📝 Nội dung",
+                    value: content || "Chưa có nội dung",
+                    inline: true
+                },
+                {
+                    name: "👤 Người tạo",
+                    value: message.author.toString(),
+                    inline: true
+                }
+            )
+            .setFooter({
+                text: `Yêu cầu bởi ${message.author.tag}`,
+                iconURL: message.author.displayAvatarURL({ dynamic: true })
+            })
+            .setTimestamp();
+
+        return message.reply({ embeds: [embed] });
+    }
+
+    // ===== AR CONTENT =====
+    if (action === "content") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Không có quyền")
+                        .setDescription(
+                            "Bạn không có quyền quản lý AutoResponder!"
+                        )
+                ]
+            });
+        }
+
+        const fullText = args.join(" ");
+        const separatorIndex = fullText.indexOf("|");
+
+        if (separatorIndex === -1) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Sai cú pháp")
+                        .setDescription(
+                            `Dùng:\n\`${prefix}ar content "trigger" | nội dung mới\``
+                        )
+                ]
+            });
+        }
+
+        let trigger = fullText.slice(0, separatorIndex).trim();
+        const newContent = fullText.slice(separatorIndex + 1).trim();
+
+        trigger = trigger.replace(/^["']|["']$/g, "").trim();
+
+        if (!trigger || !newContent) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Thiếu thông tin")
+                        .setDescription(
+                            `Dùng:\n\`${prefix}ar content "trigger" | nội dung mới\``
+                        )
+                ]
+            });
+        }
+
+        const key = normalizeAutoResTrigger(trigger);
+        const guildId = message.guild.id;
+
+        if (!autoResData[guildId] || !autoResData[guildId][key]) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Không tìm thấy trigger")
+                        .setDescription(
+                            `Không tìm thấy AutoResponder **${trigger}**.`
+                        )
+                ]
+            });
+        }
+
+        autoResData[guildId][key].content = newContent;
+
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setTitle("✅ Cập nhật AutoResponder")
+            .setDescription(
+                `Đã thay đổi nội dung của **${autoResData[guildId][key].trigger}**.`
+            )
+            .addFields({
+                name: "📝 Nội dung mới",
+                value: newContent
+            })
+            .setFooter({
+                text: `Yêu cầu bởi ${message.author.tag}`,
+                iconURL: message.author.displayAvatarURL({ dynamic: true })
+            })
+            .setTimestamp();
+
+        return message.reply({ embeds: [embed] });
+    }
+
+    // ===== AR IURL =====
+    if (action === "iurl") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Không có quyền")
+                        .setDescription(
+                            "Bạn không có quyền quản lý AutoResponder!"
+                        )
+                ]
+            });
+        }
+
+        let trigger = args.join(" ").trim();
+        trigger = trigger.replace(/^["']|["']$/g, "").trim();
+
+        if (!trigger) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Thiếu trigger")
+                        .setDescription(
+                            `Dùng:\n\`${prefix}ar iurl "trigger"\` và đính kèm ảnh.`
+                        )
+                ]
+            });
+        }
+
+        const key = normalizeAutoResTrigger(trigger);
+        const guildId = message.guild.id;
+
+        if (!autoResData[guildId] || !autoResData[guildId][key]) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Không tìm thấy trigger")
+                        .setDescription(
+                            `Không tìm thấy AutoResponder **${trigger}**.`
+                        )
+                ]
+            });
+        }
+
+        const attachment = message.attachments.first();
+
+        if (!attachment) {
+            return message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor("#ff0000")
+                        .setTitle("❌ Chưa có ảnh")
+                        .setDescription(
+                            `Hãy đính kèm **1 ảnh** cùng lệnh:\n` +
+                            `\`${prefix}ar iurl "${trigger}"\``
+                        )
+                ]
+            });
+        }
+
+        autoResData[guildId][key].image = attachment.url;
+
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setTitle("🖼️ Cập nhật ảnh AutoResponder")
+            .setDescription(
+                `Đã thêm ảnh cho trigger **${autoResData[guildId][key].trigger}**.`
+            )
+            .setImage(attachment.url)
+            .setFooter({
+                text: `Yêu cầu bởi ${message.author.tag}`,
+                iconURL: message.author.displayAvatarURL({ dynamic: true })
+            })
+            .setTimestamp();
+
+        return message.reply({ embeds: [embed] });
+    }
+
+    return;
+}
+
+
+// ===== AUTO RESPONDER TRIGGER =====
+// Phải đặt SAU phần xử lý command để tin nhắn bình thường
+// mới có thể kích hoạt AutoResponder.
+
+const autoResGuild = autoResData[message.guild.id];
+
+if (autoResGuild) {
+
+    const messageKey = normalizeAutoResTrigger(message.content);
+
+    const autoRes = autoResGuild[messageKey];
+
+    if (autoRes && autoRes.enabled) {
+
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setDescription(autoRes.content || "");
+
+        if (autoRes.image) {
+            embed.setImage(autoRes.image);
+        }
+
+        return message.reply({
+            embeds: [embed]
+        });
+    }
+}
+
 // ===== DN (Ghi donate & Tự động cấp Role VIP) =====
 if (command === "dn") {
         if (
@@ -1359,147 +1686,6 @@ if (command === "dn") {
         return message.reply(`<a:tikhong:1542901135088812092> ${message.author} Đã xóa donate cho ${member} : **-${formattedAmount}** (tổng: **${formattedTotal}**)`);
     }
 
-// ===== AUTORES LỆNH MỚI =====
-
-    if (command === "a" || command === "content") {
-
-      if (!hasPRManagerRole(message)) return message.channel.send("⛔ Bạn không có quyền quản lý AutoRes. Cần PR Manager.");
-
-      const pipe = raw.indexOf("|");
-
-      const left = pipe >= 0 ? raw.slice(0, pipe).trim() : raw.trim();
-
-      const right = pipe >= 0 ? raw.slice(pipe + 1).trim() : "";
-
-      const parsed = parseArgs(left);
-
-      const action = (parsed.shift() || "").toLowerCase();
-
-      const trigger = parsed.join(" ").trim();
-
-      if (!trigger) return message.channel.send(action === "a" ? 'Dùng: `sar a "tên trigger" | nội dung` hoặc `sar a "tên trigger"`' : 'Dùng: `sar content "tên trigger" | nội dung mới`');
-
-      const key = normalizeTrigger(trigger);
-
-      if (!key) return message.channel.send("❌ Tên trigger không hợp lệ.");
-
-      const guildData = getGuildAutoRes(message.guild.id);
-
-      if (action === "a") {
-
-        if (guildData[key]) return message.channel.send("⚠️ Trigger này đã tồn tại.");
-
-        guildData[key] = normalizeAutoResRecord({ trigger, type: "text", mode: "exact", enabled: true, content: right, embed: { title: "", description: "", color: 0x5865f2, thumbnail: "", image: "", footer: "" }, createdAt: Date.now(), createdBy: message.author.id });
-
-        saveAutoRes(autoRes);
-
-        return message.channel.send(`✅ Đã tạo trigger **${trigger}**${right ? " và thêm nội dung." : "."}`);
-
-      }
-
-      const record = findAutoRes(message.guild.id, trigger);
-
-      if (!record) return message.channel.send(`❌ Không tìm thấy trigger **${trigger}**.`);
-
-      if (action === "content") {
-
-        if (!right) return message.channel.send('❌ Nội dung không được để trống. Dùng: `sar content "trigger" | nội dung mới`');
-
-        record.content = right; record.type = "text"; saveAutoRes(autoRes);
-
-        return message.channel.send(`✅ Đã sửa nội dung trigger **${record.trigger}**.`);
-
-      }
-
-    }
-// ===== THÊM ẢNH LỚN CHO TRIGGER =====
-
-    // sar iurl "tên" — tự nhận diện: nếu là profile thì thêm ảnh lớn (nhiều ảnh),
-
-    // nếu là trigger AutoRes thì thêm/thay ảnh embed cho trigger đó (1 ảnh).
-
-    if (command === "iurl") {
-
-      const targetName = args.join(" ").trim();
-
-      if (!targetName) return message.channel.send(`❌ Dùng: \`sar iurl "profile hoặc trigger"\` + đính kèm ảnh.`);
-
-      const profile = findProfile(targetName);
-
-      if (profile) {
-
-        if (!canEditProfile(profile, message)) return message.channel.send("Bạn không có quyền sửa profile này.");
-
-        const attachments = getAttachments(message);
-
-        if (!attachments.length) return message.channel.send(`❌ Hãy đính kèm ít nhất 1 ảnh: \`sar iurl "${profile.name}"\``);
-
-        try {
-
-          for (const attachment of attachments) {
-
-            const stored = await saveAttachmentLocally(profile, "img", attachment);
-
-            profile.images.push(stored);
-
-          }
-
-          saveProfiles(profiles);
-
-          await queueProfileSync(profile, message.guild.id);
-
-          return message.channel.send(`✅ Đã thêm **${attachments.length}** ảnh lớn cho profile **${profile.name}**. Tổng: **${profile.images.length}**.`);
-
-        } catch (error) {
-
-          console.error("Thêm ảnh lớn profile thất bại:", error);
-
-          return message.channel.send("❌ Không thể lưu ảnh. Hãy thử upload lại.");
-
-        }
-
-      }
-
-      const autoResRecord = findAutoRes(message.guild.id, targetName);
-
-      if (autoResRecord) {
-
-        if (!hasPRManagerRole(message)) return message.channel.send("⛔ Bạn không có quyền quản lý AutoRes. Cần PR Manager.");
-
-        const attachments = getAttachments(message);
-
-        if (!attachments.length) return message.channel.send(`❌ Hãy đính kèm 1 ảnh: \`sar iurl "${autoResRecord.trigger}"\``);
-
-        try {
-
-          const old = autoResRecord.embed.image;
-
-          const stored = await saveAutoResAttachment(autoResRecord.trigger, "image", attachments[0]);
-
-          autoResRecord.embed.image = stored;
-
-          if (autoResRecord.type !== "embed") autoResRecord.type = "embed";
-
-          removeLocalImage(old);
-
-          saveAutoRes(autoRes);
-
-          return message.channel.send(`✅ Đã cập nhật ảnh cho trigger **${autoResRecord.trigger}**.`);
-
-        } catch (error) {
-
-          console.error("Thêm ảnh trigger thất bại:", error);
-
-          return message.channel.send("❌ Không thể lưu ảnh. Hãy thử upload lại.");
-
-        }
-
-      }
-
-      return message.channel.send(`❌ Không tìm thấy profile hoặc trigger nào tên **${targetName}**.`);
-
-    }
-    
     // ===== HELP (CÓ MENU TƯƠNG TÁC) =====
     if (command === "help") {
         const embed = getHomeEmbed(message.guild, client, prefix);
