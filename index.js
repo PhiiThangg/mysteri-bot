@@ -718,7 +718,7 @@ if (command === "mute") {
             const embed = new EmbedBuilder()
                 .setColor("#481f86")
                 .setTitle("📊 Thông tin cảnh cáo")
-                .setDescription(`✅ ${member} hiện không có cảnh cáo nào.`);
+                .setDescription(`<a:tikhong:1542901135088812092> ${member} hiện không có cảnh cáo nào.`);
                 
             return message.reply({ embeds: [embed] });
         }
@@ -1212,7 +1212,7 @@ else if (command === "role") {
             .setTimestamp();
 
         message.reply({ embeds: [embed] });
-        
+
 // Xử lý tự động gỡ role nếu có thiết lập thời gian (Temp Role)
         if (durationMs > 0) {
             setTimeout(async () => {
@@ -1225,12 +1225,12 @@ else if (command === "role") {
                         // Tạo embed thông báo hết giờ (không bị ping role hay user)
                         const expireEmbed = new EmbedBuilder()
                             .setColor("#481f86")
-                            .setTitle("⏰ Hết thời gian Temp Role")
+                            .setTitle("<a:milk1:1543226643961610352> Hết thời gian Temp Role")
                             .setDescription(`Đã tự động gỡ role cho thành viên sau thời gian đã định.`)
                             .addFields(
                                 { name: "<a:hoatim:1529735587026964491> Role", value: roleToModify.name, inline: true },
                                 { name: "<a:camap:1529737268892274890> Thành viên", value: freshMember.user.tag, inline: true },
-                                { name: "⏱️ Thời hạn", value: timeString, inline: true }
+                                { name: "<a:milk2:1543226670276808714> Thời hạn", value: timeString, inline: true }
                             )
                             .setTimestamp();
 
@@ -1300,7 +1300,7 @@ if (command === "dn") {
         const formattedTotal = donates[member.id].toLocaleString("en-US");
 
         // Giữ lại tin nhắn lệnh và phản hồi kèm tag người chạy lệnh
-        return message.reply(`✅ ${message.author} Đã ghi donate cho ${member} : **+${formattedAmount}** (tổng: **${formattedTotal}**)`);
+        return message.reply(`<a:tikhong:1542901135088812092> ${message.author} Đã ghi donate cho ${member} : **+${formattedAmount}** (tổng: **${formattedTotal}**)`);
     }
 
     // ===== XOADN (Xóa/Trừ bớt donate) =====
@@ -1356,7 +1356,7 @@ if (command === "dn") {
         const formattedTotal = donates[member.id].toLocaleString("en-US");
 
         // Giữ lại tin nhắn lệnh và phản hồi theo đúng định dạng yêu cầu
-        return message.reply(`✅ ${message.author} Đã xóa donate cho ${member} : **-${formattedAmount}** (tổng: **${formattedTotal}**)`);
+        return message.reply(`<a:tikhong:1542901135088812092> ${message.author} Đã xóa donate cho ${member} : **-${formattedAmount}** (tổng: **${formattedTotal}**)`);
     }
 
     // ===== HELP (CÓ MENU TƯƠNG TÁC) =====
@@ -1537,7 +1537,7 @@ client.on("interactionCreate", async (interaction) => {
                     .setAuthor({ name: interaction.guild.name, iconURL: interaction.guild.iconURL({ dynamic: true }) })
                     .setTitle(`Avatar của ${fetchedTarget ? fetchedTarget.tag : interaction.user.tag}`)
                     .setImage(avatarURL)
-                    .setDescription(`✅ Đã chấp nhận yêu cầu xem avatar từ <@${requesterId}>`)
+                    .setDescription(`<a:tikhong:1542901135088812092> Đã chấp nhận yêu cầu xem avatar từ <@${requesterId}>`)
                     .setFooter({ text: `Được yêu cầu bởi ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL({ dynamic: true }) })
                     .setTimestamp();
 
