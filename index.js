@@ -1064,7 +1064,7 @@ if (command === "mute") {
         });
     }
 
-    // ===== ROLE (hrole) =====
+// ===== ROLE (hrole - Hỗ trợ Temp Role) =====
 else if (command === "role") {
 
     // Kiểm tra quyền người sử dụng
@@ -1083,32 +1083,56 @@ else if (command === "role") {
     // Lấy thành viên được mention
     const targetMember = message.mentions.members.first();
 
-    // Xác định tên role
-    let roleQuery = "";
+    // Xác định phần text còn lại sau khi bỏ command và mention (nếu có)
+    let queryArgs = targetMember ? args.slice(1) : [...args];
 
-    if (targetMember) {
-        roleQuery = args.slice(1).join(" ").trim();
-    } else {
-        roleQuery = args.join(" ").trim();
-    }
-
-    if (!roleQuery) {
+    if (queryArgs.length === 0) {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
             .setTitle("❌ Thiếu thông tin")
             .setDescription(
-                `Hãy nhập tên role hoặc mention thành viên!\n\n` +
+                `Hãy nhập tên role hoặc thời gian!\n\n` +
                 `📌 Ví dụ: \`${prefix}role Cư dân\`\n` +
-                `📌 Hoặc: \`${prefix}role @user Cư dân\``
+                `📌 Ví dụ Temp Role: \`${prefix}role @user Cư dân 10m\``
             );
 
+        return message.reply({ embeds: [errEmbed] });
+    }
+
+    // Kiểm tra xem từ cuối cùng có phải là thời gian không (ví dụ: 10s, 5m, 2h, 1d)
+    let durationMs = 0;
+    let timeString = "";
+    const lastArg = queryArgs[queryArgs.length - 1];
+    const timeRegex = /^(\d+)([smhd])$/i;
+    const timeMatch = lastArg.match(timeRegex);
+
+    if (timeMatch) {
+        const value = parseInt(timeMatch[1]);
+        const unit = timeMatch[2].toLowerCase();
+
+        if (unit === 's') durationMs = value * 1000;
+        else if (unit === 'm') durationMs = value * 60 * 1000;
+        else if (unit === 'h') durationMs = value * 60 * 60 * 1000;
+        else if (unit === 'd') durationMs = value * 24 * 60 * 60 * 1000;
+
+        timeString = lastArg;
+        queryArgs.pop(); // Bỏ phần thời gian ra khỏi mảng tên role
+    }
+
+    const roleQuery = queryArgs.join(" ").trim();
+
+    if (!roleQuery) {
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Thiếu tên role")
+            .setDescription("Vui lòng nhập tên role cần thêm/gỡ!");
         return message.reply({ embeds: [errEmbed] });
     }
 
     // Người được thay đổi role
     const memberToModify = targetMember || message.member;
 
-    // Tìm role theo tên
+    // Tìm role theo tên (cho phép viết tắt từ đầu hoặc gõ từ khóa)
     const roleToModify = message.guild.roles.cache.find(
         role => 
             role.name.toLowerCase().startsWith(roleQuery.toLowerCase()) || 
@@ -1119,9 +1143,7 @@ else if (command === "role") {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
             .setTitle("❌ Không tìm thấy role")
-            .setDescription(
-                `Không tìm thấy role nào phù hợp với **${roleQuery}**!`
-            );
+            .setDescription(`Không tìm thấy role nào phù hợp với **${roleQuery}**!`);
 
         return message.reply({ embeds: [errEmbed] });
     }
@@ -1129,144 +1151,93 @@ else if (command === "role") {
     // Lấy bot member
     const botMember = message.guild.members.me;
 
-    if (!botMember) {
-        const errEmbed = new EmbedBuilder()
-            .setColor("#ff0000")
-            .setTitle("❌ Không tìm thấy bot")
-            .setDescription("Không thể xác định thành viên của bot trong server.");
-
-        return message.reply({ embeds: [errEmbed] });
-    }
-
-    // Kiểm tra bot có Manage Roles
-    if (!botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+    if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
             .setTitle("❌ Bot thiếu quyền")
-            .setDescription(
-                "Bot cần quyền **Manage Roles** để thêm hoặc gỡ role."
-            );
+            .setDescription("Bot cần quyền **Manage Roles** để thực hiện lệnh này.");
 
         return message.reply({ embeds: [errEmbed] });
     }
 
-    // Không thể thao tác với @everyone
-    if (roleToModify.id === message.guild.id) {
+    // Không thể thao tác với @everyone hoặc managed role
+    if (roleToModify.id === message.guild.id || roleToModify.managed) {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
             .setTitle("❌ Role không hợp lệ")
-            .setDescription("Không thể thêm hoặc gỡ role `@everyone`.");
+            .setDescription("Không thể thêm hoặc gỡ role này.");
 
         return message.reply({ embeds: [errEmbed] });
     }
 
-    // Không thể thao tác với managed/integration role
-    if (roleToModify.managed) {
-        const errEmbed = new EmbedBuilder()
-            .setColor("#ff0000")
-            .setTitle("❌ Role không thể chỉnh sửa")
-            .setDescription(
-                "Role này được quản lý bởi một integration/bot khác nên không thể thêm hoặc gỡ."
-            );
-
-        return message.reply({ embeds: [errEmbed] });
-    }
-
-    // Role của bot phải cao hơn role cần thao tác
+    // Phân cấp role
     if (roleToModify.position >= botMember.roles.highest.position) {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
             .setTitle("❌ Lỗi phân cấp role")
-            .setDescription(
-                "Bot không thể thêm/gỡ role này vì role đó **cao hơn hoặc ngang bằng role cao nhất của bot**."
-            );
+            .setDescription("Bot không thể thêm/gỡ role này vì role đó cao hơn hoặc ngang bằng role cao nhất của bot.");
 
         return message.reply({ embeds: [errEmbed] });
     }
 
     try {
-
-        // Nếu đã có role -> GỠ ROLE
+        // Nếu đã có role -> GỠ ROLE (Hủy bỏ temp role nếu đang có)
         if (memberToModify.roles.cache.has(roleToModify.id)) {
-
-            await memberToModify.roles.remove(
-                roleToModify,
-                `Role removed by ${message.author.tag}`
-            );
+            await memberToModify.roles.remove(roleToModify, `Role removed by ${message.author.tag}`);
 
             const embed = new EmbedBuilder()
                 .setColor("#481f86")
                 .setTitle("❌ Gỡ Role thành công")
-                .setDescription(
-                    `Đã gỡ role ${roleToModify} khỏi ${memberToModify}.`
-                )
+                .setDescription(`Đã gỡ role ${roleToModify} khỏi ${memberToModify}.`)
                 .addFields(
-                    {
-                        name: "<a:camap:1529737268892274890> Moderator",
-                        value: message.author.tag,
-                        inline: true
-                    },
-                    {
-                        name: "<a:hoatim:1529735587026964491> Role",
-                        value: roleToModify.name,
-                        inline: true
-                    }
+                    { name: "<a:camap:1529737268892274890> Moderator", value: message.author.tag, inline: true },
+                    { name: "<a:hoatim:1529735587026964491> Role", value: roleToModify.name, inline: true }
                 )
                 .setTimestamp();
 
-            return message.reply({
-                embeds: [embed]
-            });
+            return message.reply({ embeds: [embed] });
         }
 
         // Nếu chưa có role -> THÊM ROLE
-        await memberToModify.roles.add(
-            roleToModify,
-            `Role added by ${message.author.tag}`
-        );
+        await memberToModify.roles.add(roleToModify, `Role added by ${message.author.tag}`);
 
         const embed = new EmbedBuilder()
             .setColor("#481f86")
             .setTitle("<a:tikhong:1542901135088812092> Thêm Role thành công")
-            .setDescription(
-                `Đã thêm role ${roleToModify} cho ${memberToModify}.`
-            )
+            .setDescription(`Đã thêm role ${roleToModify} cho ${memberToModify}.` + (timeString ? `\n⏱️ **Thời hạn:** ${timeString}` : ""))
             .addFields(
-                {
-                    name: "<a:camap:1529737268892274890> Moderator",
-                    value: message.author.tag,
-                    inline: true
-                },
-                {
-                    name: "<a:hoatim:1529735587026964491> Role",
-                    value: roleToModify.name,
-                    inline: true
-                }
+                { name: "<a:camap:1529737268892274890> Moderator", value: message.author.tag, inline: true },
+                { name: "<a:hoatim:1529735587026964491> Role", value: roleToModify.name, inline: true }
             )
             .setTimestamp();
 
-        return message.reply({
-            embeds: [embed]
-        });
+        message.reply({ embeds: [embed] });
+
+        // Xử lý tự động gỡ role nếu có thiết lập thời gian (Temp Role)
+        if (durationMs > 0) {
+            setTimeout(async () => {
+                try {
+                    // Fetch lại member để đảm bảo dữ liệu mới nhất
+                    const freshMember = await message.guild.members.fetch(memberToModify.id).catch(() => null);
+                    if (freshMember && freshMember.roles.cache.has(roleToModify.id)) {
+                        await freshMember.roles.remove(roleToModify, "Temporary role expired.");
+                        
+                        // Gửi thông báo vào kênh chat nếu muốn
+                        message.channel.send(`⏰ Đã hết thời gian (${timeString}), tự động gỡ role ${roleToModify} khỏi ${freshMember}.`).catch(() => {});
+                    }
+                } catch (err) {
+                    console.error("[TEMP ROLE EXPIRED ERROR]", err);
+                }
+            }, durationMs);
+        }
 
     } catch (error) {
-
         console.error("[ROLE ERROR]", error);
-
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
-            .setTitle("❌ Không thể thay đổi Role")
-            .setDescription(
-                "Đã xảy ra lỗi khi thêm/gỡ role.\n\n" +
-                "Hãy kiểm tra:\n" +
-                "• Bot có quyền **Manage Roles**\n" +
-                "• Role của bot nằm **cao hơn** role cần chỉnh sửa\n" +
-                "• Role không phải role được quản lý bởi integration"
-            );
-
-        return message.reply({
-            embeds: [errEmbed]
-        });
+            .setTitle("❌ Lỗi")
+            .setDescription("Đã xảy ra lỗi khi cấp hoặc gỡ role.");
+        return message.reply({ embeds: [errEmbed] });
     }
 }
 
