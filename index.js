@@ -376,7 +376,7 @@ client.on("messageCreate", async (message) => {
         return;
     }
 
-    if (!message.content.startsWith(prefix)) return;
+    if (!message.content.toLowerCase().startsWith(prefix.toLowerCase())) return;
 
     const args = message.content.slice(prefix.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
@@ -578,6 +578,55 @@ if (command === "mute") {
     }
 }
 
+// ===== UNMUTE =====
+    if (command === "unmute") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
+            return tempReply(
+                message,
+                `❌ Bạn không có quyền để sử dụng lệnh này!\n\n📌 Quyền hạn: Hạn chế thành viên (Moderate Members)`
+            );
+
+        const member = message.mentions.members.first();
+
+        if (!member)
+            return tempReply(message, "❌ Hãy mention người cần unmute.");
+
+        const reason = args.slice(1).join(" ") || "Không có lý do.";
+
+        try {
+            // Truyền null vào timeout để gỡ lệnh cấm chat
+            await member.timeout(null, reason);
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle("🔊 Unmute thành công")
+                .setDescription(`${member} đã được gỡ mute.`)
+                .addFields(
+                    {
+                        name: "<a:camap:1529737268892274890> Moderator",
+                        value: message.author.tag,
+                        inline: true
+                    },
+                    {
+                        name: "📝 Lý do",
+                        value: reason,
+                        inline: true
+                    }
+                );
+
+            return message.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error("[UNMUTE ERROR]", error);
+
+            return tempReply(
+                message,
+                "❌ Không thể unmute thành viên này. Hãy kiểm tra quyền `Moderate Members` và vị trí role của bot."
+            );
+        }
+    }
+
     // ===== WARN =====
     if (command === "warn") {
 
@@ -687,6 +736,136 @@ if (command === "mute") {
         });
 
         return message.reply({ embeds: [embed] });
+    }
+
+// ===== LOCK CHANNEL (hlock) =====
+    if (command === "lock") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Không có quyền")
+                .setDescription(
+                    "Bạn không có quyền để sử dụng lệnh này!\n\n" +
+                    "📌 Quyền hạn: Quản lý kênh (Manage Channels)."
+                );
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+
+        const targetChannel = message.mentions.channels.first() || message.channel;
+        const botMember = message.guild.members.me;
+
+        if (!botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Bot thiếu quyền")
+                .setDescription("Bot cần quyền **Manage Channels** để khóa kênh.");
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+
+        try {
+            await targetChannel.permissionOverwrites.edit(message.guild.roles.everyone, {
+                SendMessages: false
+            }, { reason: `Locked by ${message.author.tag}` });
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle("<a:tikhong:1542901135088812092> Khóa kênh thành công")
+                .setDescription(
+                    `Đã khóa kênh ${targetChannel}.`
+                )
+                .addFields(
+                    {
+                        name: "<a:camap:1529737268892274890> Moderator",
+                        value: message.author.tag,
+                        inline: true
+                    },
+                    {
+                        name: "<a:hoatim:1529735587026964491> Kênh",
+                        value: targetChannel.name,
+                        inline: true
+                    }
+                )
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error("[LOCK ERROR]", error);
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Không thể khóa kênh")
+                .setDescription("Đã xảy ra lỗi khi khóa kênh này.");
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+    }
+
+    // ===== UNLOCK CHANNEL (hunlock) =====
+    if (command === "unlock") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Không có quyền")
+                .setDescription(
+                    "Bạn không có quyền để sử dụng lệnh này!\n\n" +
+                    "📌 Quyền hạn: Quản lý kênh (Manage Channels)."
+                );
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+
+        const targetChannel = message.mentions.channels.first() || message.channel;
+        const botMember = message.guild.members.me;
+
+        if (!botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Bot thiếu quyền")
+                .setDescription("Bot cần quyền **Manage Channels** để mở khóa kênh.");
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+
+        try {
+            await targetChannel.permissionOverwrites.edit(message.guild.roles.everyone, {
+                SendMessages: null
+            }, { reason: `Unlocked by ${message.author.tag}` });
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle("<a:tikhong:1542901135088812092> Mở khóa kênh thành công")
+                .setDescription(
+                    `Đã mở khóa kênh ${targetChannel}.`
+                )
+                .addFields(
+                    {
+                        name: "<a:camap:1529737268892274890> Moderator",
+                        value: message.author.tag,
+                        inline: true
+                    },
+                    {
+                        name: "<a:hoatim:1529735587026964491> Kênh",
+                        value: targetChannel.name,
+                        inline: true
+                    }
+                )
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error("[UNLOCK ERROR]", error);
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Không thể mở khóa kênh")
+                .setDescription("Đã xảy ra lỗi khi mở khóa kênh này.");
+
+            return message.reply({ embeds: [errEmbed] });
+        }
     }
 
     // ===== GIVEAWAY START (hgastart) =====
@@ -889,10 +1068,7 @@ if (command === "mute") {
 else if (command === "role") {
 
     // Kiểm tra quyền người sử dụng
-    if (
-        message.author.id !== OWNER_ID &&
-        !message.member.permissions.has(PermissionsBitField.Flags.ManageRoles)
-    ) {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
             .setTitle("❌ Không có quyền")
@@ -922,8 +1098,8 @@ else if (command === "role") {
             .setTitle("❌ Thiếu thông tin")
             .setDescription(
                 `Hãy nhập tên role hoặc mention thành viên!\n\n` +
-                `📌 Ví dụ: \`${PREFIX}role Cư dân\`\n` +
-                `📌 Hoặc: \`${PREFIX}role @user Cư dân\``
+                `📌 Ví dụ: \`${prefix}role Cư dân\`\n` +
+                `📌 Hoặc: \`${prefix}role @user Cư dân\``
             );
 
         return message.reply({ embeds: [errEmbed] });
