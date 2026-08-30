@@ -1213,8 +1213,7 @@ else if (command === "role") {
 
         message.reply({ embeds: [embed] });
 
-        // Xử lý tự động gỡ role nếu có thiết lập thời gian (Temp Role)
-        if (durationMs > 0) {
+     if (durationMs > 0) {
             setTimeout(async () => {
                 try {
                     // Fetch lại member để đảm bảo dữ liệu mới nhất
@@ -1222,14 +1221,25 @@ else if (command === "role") {
                     if (freshMember && freshMember.roles.cache.has(roleToModify.id)) {
                         await freshMember.roles.remove(roleToModify, "Temporary role expired.");
                         
-                        // Gửi thông báo vào kênh chat nếu muốn
-                        message.channel.send(`⏰ Đã hết thời gian (${timeString}), tự động gỡ role ${roleToModify} khỏi ${freshMember}.`).catch(() => {});
+                        // Tạo embed thông báo hết giờ (không bị ping role hay user)
+                        const expireEmbed = new EmbedBuilder()
+                            .setColor("#481f86")
+                            .setTitle("⏰ Hết thời gian Temp Role")
+                            .setDescription(`Đã tự động gỡ role cho thành viên sau thời gian đã định.`)
+                            .addFields(
+                                { name: "<a:hoatim:1529735587026964491> Role", value: roleToModify.name, inline: true },
+                                { name: "<a:camap:1529737268892274890> Thành viên", value: freshMember.user.tag, inline: true },
+                                { name: "⏱️ Thời hạn", value: timeString, inline: true }
+                            )
+                            .setTimestamp();
+
+                        message.channel.send({ embeds: [expireEmbed] }).catch(() => {});
                     }
                 } catch (err) {
                     console.error("[TEMP ROLE EXPIRED ERROR]", err);
                 }
             }, durationMs);
-        }
+    
 
     } catch (error) {
         console.error("[ROLE ERROR]", error);
