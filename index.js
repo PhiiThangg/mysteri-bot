@@ -34,12 +34,7 @@ const chokidar = require("chokidar");
 const { Octokit } = require("@octokit/rest");
 
 const TOKEN = process.env.TOKEN;
-const PREFIX = (process.env.PREFIX || "sar").replace(/^!/, "").trim() || "sar";
-const DATA_FILE = path.join(__dirname, "..", "data", "profiles.json");
-const PERMISSION_FILE = path.join(__dirname, "..", "data", "pr_roles.json");
-const PR_ADMIN_FILE = path.join(__dirname, "..", "data", "pr_admin_roles.json");
-const SALARY_APPROVAL_FILE = path.join(__dirname, "..", "data", "salary_approvals.json");
-const AUTORES_FILE = path.join(__dirname, "..", "data", "autores.json");
+const prefix = (process.env.prefix || "h").replace(/^!/, "").trim() || "h";
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -1256,34 +1251,6 @@ else if (command === "role") {
         return message.reply({ embeds: [errEmbed] });
     }
 }
-
-    // ===== AUTORES LỆNH MỚI =====
-    if (command === "a" || command === "content") {
-      if (!hasPRManagerRole(message)) return message.channel.send("⛔ Bạn không có quyền quản lý AutoRes. Cần PR Manager.");
-      const pipe = raw.indexOf("|");
-      const left = pipe >= 0 ? raw.slice(0, pipe).trim() : raw.trim();
-      const right = pipe >= 0 ? raw.slice(pipe + 1).trim() : "";
-      const parsed = parseArgs(left);
-      const action = (parsed.shift() || "").toLowerCase();
-      const trigger = parsed.join(" ").trim();
-      if (!trigger) return message.channel.send(action === "a" ? 'Dùng: `sar a "tên trigger" | nội dung` hoặc `sar a "tên trigger"`' : 'Dùng: `sar content "tên trigger" | nội dung mới`');
-      const key = normalizeTrigger(trigger);
-      if (!key) return message.channel.send("❌ Tên trigger không hợp lệ.");
-      const guildData = getGuildAutoRes(message.guild.id);
-      if (action === "a") {
-        if (guildData[key]) return message.channel.send("⚠️ Trigger này đã tồn tại.");
-        guildData[key] = normalizeAutoResRecord({ trigger, type: "text", mode: "exact", enabled: true, content: right, embed: { title: "", description: "", color: 0x5865f2, thumbnail: "", image: "", footer: "" }, createdAt: Date.now(), createdBy: message.author.id });
-        saveAutoRes(autoRes);
-        return message.channel.send(`✅ Đã tạo trigger **${trigger}**${right ? " và thêm nội dung." : "."}`);
-      }
-      const record = findAutoRes(message.guild.id, trigger);
-      if (!record) return message.channel.send(`❌ Không tìm thấy trigger **${trigger}**.`);
-      if (action === "content") {
-        if (!right) return message.channel.send('❌ Nội dung không được để trống. Dùng: `sar content "trigger" | nội dung mới`');
-        record.content = right; record.type = "text"; saveAutoRes(autoRes);
-        return message.channel.send(`✅ Đã sửa nội dung trigger **${record.trigger}**.`);
-      }
-    }
 
 // ===== DN (Ghi donate & Tự động cấp Role VIP) =====
 if (command === "dn") {
