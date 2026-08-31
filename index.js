@@ -381,26 +381,32 @@ function findMatchingAutoRes(guildId, content) {
   return null;
 }
 
-//autores: help + lệnh prefix "${prefix}ar <sub> ..."
-function autoResHelp() {
-  return [
-    "**🤖 AUTORES**",
-    `\`${prefix}ar create "hello" text|embed\` — tạo trigger mới`,
-    `\`${prefix}ar content "hello" nội dung\` — sửa nội dung (text)`,
-    `\`${prefix}ar title "hello" tiêu đề\` — sửa title (embed)`,
-    `\`${prefix}ar desc "hello" mô tả\` — sửa description (embed)`,
-    `\`${prefix}ar color "hello" #ff69b4\` — sửa màu embed`,
-    `\`${prefix}ar footer "hello" footer\` — sửa footer (embed)`,
-    `\`${prefix}ar thumb "hello"\` + ảnh — sửa thumbnail (embed)`,
-    `\`${prefix}ar image "hello"\` + ảnh — sửa ảnh lớn (embed)`,
-    `\`${prefix}ar type "hello" text|embed\` — đổi loại`,
-    `\`${prefix}ar mode "hello" exact|contains\` — đổi cách khớp`,
-    `\`${prefix}ar on "hello"\` / \`${prefix}ar off "hello"\` — bật/tắt`,
-    `\`${prefix}ar list\` — danh sách trigger`,
-    `\`${prefix}ar delete "hello"\` — xóa trigger`,
-    "",
-    "Ngoài ra có thể dùng slash command `/ar` với các subcommand tương tự.",
-  ].join("\n");
+function autoResHelp(message) {
+    return new EmbedBuilder()
+        .setColor("#481f86")
+        .setTitle("🤖 AUTORES")
+        .setDescription([
+            `\`${prefix}ar create "hello" text|embed\` — tạo trigger mới`,
+            `\`${prefix}ar content "hello" nội dung\` — sửa nội dung (text)`,
+            `\`${prefix}ar title "hello" tiêu đề\` — sửa title (embed)`,
+            `\`${prefix}ar desc "hello" mô tả\` — sửa description (embed)`,
+            `\`${prefix}ar color "hello" #ff69b4\` — sửa màu embed`,
+            `\`${prefix}ar footer "hello" footer\` — sửa footer (embed)`,
+            `\`${prefix}ar thumb "hello"\` + ảnh — sửa thumbnail (embed)`,
+            `\`${prefix}ar image "hello"\` + ảnh — sửa ảnh lớn (embed)`,
+            `\`${prefix}ar type "hello" text|embed\` — đổi loại`,
+            `\`${prefix}ar mode "hello" exact|contains\` — đổi cách khớp`,
+            `\`${prefix}ar on "hello"\` / \`${prefix}ar off "hello"\` — bật/tắt`,
+            `\`${prefix}ar list\` — danh sách trigger`,
+            `\`${prefix}ar delete "hello"\` — xóa trigger`,
+            "",
+            "Ngoài ra có thể dùng slash command `/ar` với các subcommand tương tự."
+        ].join("\n"))
+        .setFooter({
+            text: `Yêu cầu bởi ${message.author.tag}`,
+            iconURL: message.author.displayAvatarURL({ dynamic: true })
+        })
+        .setTimestamp();
 }
 
 // parseArgs: tách "..." thành 1 phần tử, còn lại tách theo khoảng trắng
