@@ -381,6 +381,7 @@ function findMatchingAutoRes(guildId, content) {
   return null;
 }
 
+//autores help
 function autoResHelp(message) {
     return new EmbedBuilder()
         .setColor("#481f86")
@@ -424,7 +425,9 @@ async function handleAutoResCommand(message, rawArgs) {
   if (!message.guild) return message.channel.send("Lệnh này chỉ dùng trong server.");
   const args = [...rawArgs];
   const sub = (args.shift() || "").toLowerCase();
-  if (!sub) return message.channel.send(autoResHelp());
+if (!sub) return message.channel.send({
+    embeds: [autoResHelp(message)]
+});
 
   const guildData = getGuildAutoRes(message.guild.id);
   const trigger = args[0];
@@ -536,7 +539,9 @@ async function handleAutoResCommand(message, rawArgs) {
     }
   }
 
-  return message.channel.send(autoResHelp());
+return message.channel.send({
+    embeds: [autoResHelp(message)]
+});
 }
 
 //autores: slash command "/ar" — tạo bằng modal, còn lại bằng option
