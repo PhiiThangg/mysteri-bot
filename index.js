@@ -45,7 +45,11 @@ const client = new Client({
   ]
 });
 
-// ===== Railway -> GitHub: debounce 2 phút sau lần thay đổi cuối =====
+//autores: file dữ liệu + thư mục ảnh cho tính năng AutoRes (chuyển từ index.js)
+const AUTORES_FILE = path.join(__dirname, "..", "data", "autores.json");
+const IMAGE_DIR = path.join(__dirname, "..", "data", "images");
+
+// railway
 const DATA_DIR = path.join(__dirname, "..", "data");
 const GITHUB_SYNC_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GITHUB_SYNC_DELAY = 2 * 60 * 1000;
@@ -169,7 +173,606 @@ function startGitHubDataWatcher() {
 
 startGitHubDataWatcher();
 
-// ===== QUẢN LÝ WARN (ĐỌC/GHI FILE warns.json) =====
+// ================== //autores: TÍNH NĂNG AUTORES ==================
+// Bot tự động trả lời khi có người gõ đúng trigger đã cấu hình theo từng server.
+// Toàn bộ khối bên dưới thuộc tính năng AutoRes.
+
+//autores: ghi file JSON bất đồng bộ, không chặn event loop (atomic write)
+const pendingJsonWrites = new Map();
+function writeJsonAsync(filePath, data) {
+  const json = JSON.stringify(data, null, 2);
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  const previous = pendingJsonWrites.get(filePath) || Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(() => fs.promises.mkdir(path.dirname(filePath), { recursive: true }))
+    .then(() => fs.promises.writeFile(tmpPath, json, "utf8"))
+    .then(() => fs.promises.rename(tmpPath, filePath))
+    .catch(error => console.error(`[writeJsonAsync] Ghi ${filePath} thất bại:`, error.message || error));
+  pendingJsonWrites.set(filePath, next);
+  next.finally(() => {
+    if (pendingJsonWrites.get(filePath) === next) pendingJsonWrites.delete(filePath);
+  });
+  return next;
+}
+
+//autores: quyền AutoRes
+function hasAutoResManagerRole(context) {
+  const guild = context?.guild || context?.member?.guild;
+  const member = context?.member;
+  if (!guild || !member) return false;
+  return Boolean(
+    member.permissions?.has(PermissionsBitField.Flags.Administrator) ||
+    member.permissions?.has(PermissionsBitField.Flags.ManageGuild)
+  );
+}
+
+//autores: ảnh đính kèm/tên file dùng chung
+function isImageAttachment(a) {
+  if (a.contentType?.startsWith("image/")) return true;
+  return /\.(png|jpe?g|gif|webp)$/i.test(a.name || "");
+}
+
+function getAttachments(message) {
+  return [...message.attachments.values()].filter(isImageAttachment);
+}
+
+function safeFileName(name) {
+  return String(name || "autores")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/_+/g, "_")
+    .slice(0, 60);
+}
+
+function localImagePath(value) {
+  if (!value || !value.startsWith("local:")) return null;
+  return path.join(IMAGE_DIR, path.basename(value.slice(6)));
+}
+
+function extensionFromAttachment(attachment) {
+  const ext = path.extname(attachment.name || "").toLowerCase();
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext)) return ext;
+  const type = attachment.contentType || "";
+  if (type.includes("png")) return ".png";
+  if (type.includes("jpeg")) return ".jpg";
+  if (type.includes("gif")) return ".gif";
+  if (type.includes("webp")) return ".webp";
+  return ".png";
+}
+
+function removeLocalImage(value) {
+  const filePath = localImagePath(value);
+  if (filePath && fs.existsSync(filePath)) {
+    try { fs.unlinkSync(filePath); } catch {}
+  }
+}
+
+function normalizeProfileColor(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const text = value.trim().replace(/^#/, "");
+    if (/^[0-9a-f]{6}$/i.test(text)) return parseInt(text, 16);
+  }
+  return 0x5865f2;
+}
+
+//autores: đọc/ghi dữ liệu autores.json + tự đồng bộ khi file bị thay đổi từ tiến trình khác
+function loadAutoRes() {
+  try {
+    const data = JSON.parse(fs.readFileSync(AUTORES_FILE, "utf8"));
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveAutoRes(data) {
+  writeJsonAsync(AUTORES_FILE, data);
+}
+
+let autoRes = loadAutoRes();
+
+fs.watchFile(AUTORES_FILE, { interval: 2000 }, () => {
+  const fresh = loadAutoRes();
+  if (fresh && typeof fresh === "object") autoRes = fresh;
+});
+
+//autores: các hàm lõi thao tác trigger
+function normalizeTrigger(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function getGuildAutoRes(guildId) {
+  if (!autoRes[guildId] || typeof autoRes[guildId] !== "object") autoRes[guildId] = {};
+  return autoRes[guildId];
+}
+
+function findAutoRes(guildId, trigger) {
+  const key = normalizeTrigger(trigger);
+  if (!key) return null;
+  return getGuildAutoRes(guildId)[key] || null;
+}
+
+function normalizeAutoResRecord(record) {
+  record.type = record.type === "embed" ? "embed" : "text";
+  record.mode = record.mode === "contains" ? "contains" : "exact";
+  record.enabled = record.enabled !== false;
+  record.content = String(record.content || "");
+  if (!record.embed || typeof record.embed !== "object") record.embed = {};
+  record.embed.title = String(record.embed.title || "");
+  record.embed.description = String(record.embed.description || "");
+  record.embed.color = normalizeProfileColor(record.embed.color);
+  record.embed.thumbnail = String(record.embed.thumbnail || "");
+  record.embed.image = String(record.embed.image || "");
+  record.embed.footer = String(record.embed.footer || "");
+  return record;
+}
+
+function safeAutoResFileName(trigger, type, attachment) {
+  const ext = extensionFromAttachment(attachment);
+  return `${safeFileName(trigger)}_${type}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`;
+}
+
+async function saveAutoResAttachment(trigger, type, attachment) {
+  fs.mkdirSync(IMAGE_DIR, { recursive: true });
+  const fileName = safeAutoResFileName(trigger, type, attachment);
+  const filePath = path.join(IMAGE_DIR, fileName);
+  const response = await fetch(attachment.url);
+  if (!response.ok) throw new Error(`Download ảnh thất bại: HTTP ${response.status}`);
+  fs.writeFileSync(filePath, Buffer.from(await response.arrayBuffer()));
+  return `local:${fileName}`;
+}
+
+function buildAutoResEmbed(record, attachmentNames = {}) {
+  const e = record.embed || {};
+  const embed = new EmbedBuilder().setColor(e.color || 0x5865f2);
+  if (e.title) embed.setTitle(e.title);
+  if (e.description) embed.setDescription(e.description);
+  if (e.footer) embed.setFooter({ text: e.footer });
+  if (e.thumbnail) embed.setThumbnail(attachmentNames.thumbnail ? `attachment://${attachmentNames.thumbnail}` : e.thumbnail);
+  if (e.image) embed.setImage(attachmentNames.image ? `attachment://${attachmentNames.image}` : e.image);
+  return embed;
+}
+
+function autoResFiles(record) {
+  const files = [];
+  const names = {};
+  for (const [key, value] of [["thumbnail", record.embed.thumbnail], ["image", record.embed.image]]) {
+    const filePath = localImagePath(value);
+    if (filePath && fs.existsSync(filePath)) {
+      const name = path.basename(filePath);
+      files.push(new AttachmentBuilder(filePath).setName(name));
+      names[key] = name;
+    }
+  }
+  return { files, names };
+}
+
+function autoResPayload(record) {
+  const media = record.type === "embed" ? autoResFiles(record) : { files: [], names: {} };
+  const payload = {};
+  if (record.content) payload.content = record.content;
+  if (record.type === "embed") {
+    payload.embeds = [buildAutoResEmbed(record, media.names)];
+    payload.files = media.files;
+  }
+  return payload;
+}
+
+function findMatchingAutoRes(guildId, content) {
+  const text = normalizeTrigger(content);
+  if (!text) return null;
+
+  const entries = Object.values(getGuildAutoRes(guildId));
+  for (const rawRecord of entries) {
+    const record = normalizeAutoResRecord(rawRecord);
+    if (!record.enabled) continue;
+
+    const trigger = normalizeTrigger(record.trigger);
+    if (!trigger) continue;
+
+    // Text AutoRes bắt buộc phải có nội dung; Embed có thể chỉ dùng embed.
+    if (record.type === "text" && !String(record.content || "").trim()) continue;
+
+    if (record.mode === "contains" ? text.includes(trigger) : text === trigger) {
+      return record;
+    }
+  }
+  return null;
+}
+
+//autores: help + lệnh prefix "${prefix}ar <sub> ..."
+function autoResHelp() {
+  return [
+    "**🤖 AUTORES**",
+    `\`${prefix}ar create "hello" text|embed\` — tạo trigger mới`,
+    `\`${prefix}ar content "hello" nội dung\` — sửa nội dung (text)`,
+    `\`${prefix}ar title "hello" tiêu đề\` — sửa title (embed)`,
+    `\`${prefix}ar desc "hello" mô tả\` — sửa description (embed)`,
+    `\`${prefix}ar color "hello" #ff69b4\` — sửa màu embed`,
+    `\`${prefix}ar footer "hello" footer\` — sửa footer (embed)`,
+    `\`${prefix}ar thumb "hello"\` + ảnh — sửa thumbnail (embed)`,
+    `\`${prefix}ar image "hello"\` + ảnh — sửa ảnh lớn (embed)`,
+    `\`${prefix}ar type "hello" text|embed\` — đổi loại`,
+    `\`${prefix}ar mode "hello" exact|contains\` — đổi cách khớp`,
+    `\`${prefix}ar on "hello"\` / \`${prefix}ar off "hello"\` — bật/tắt`,
+    `\`${prefix}ar list\` — danh sách trigger`,
+    `\`${prefix}ar delete "hello"\` — xóa trigger`,
+    "",
+    "Ngoài ra có thể dùng slash command `/ar` với các subcommand tương tự.",
+  ].join("\n");
+}
+
+// parseArgs: tách "..." thành 1 phần tử, còn lại tách theo khoảng trắng
+function parseAutoResArgs(input) {
+  const args = [];
+  const regex = /"([^"]+)"|(\S+)/g;
+  let match;
+  while ((match = regex.exec(input)) !== null) {
+    args.push(match[1] !== undefined ? match[1] : match[2]);
+  }
+  return args;
+}
+
+async function handleAutoResCommand(message, rawArgs) {
+  if (!message.guild) return message.channel.send("Lệnh này chỉ dùng trong server.");
+  const args = [...rawArgs];
+  const sub = (args.shift() || "").toLowerCase();
+  if (!sub) return message.channel.send(autoResHelp());
+
+  const guildData = getGuildAutoRes(message.guild.id);
+  const trigger = args[0];
+  const record = trigger ? findAutoRes(message.guild.id, trigger) : null;
+  const needsManager = ["create", "delete", "content", "title", "desc", "color", "footer", "thumb", "image", "type", "mode", "on", "off"].includes(sub);
+
+  if (needsManager && !hasAutoResManagerRole(message)) {
+    return message.channel.send("⛔ Bạn không có quyền AutoRes.");
+  }
+
+  if (sub === "create") {
+    const type = (args[args.length - 1] || "").toLowerCase();
+    if (!["text", "embed"].includes(type)) return message.channel.send(`Dùng: \`${prefix}ar create "hello" text|embed\``);
+    args.pop();
+    const key = normalizeTrigger(args.join(" "));
+    if (!key) return message.channel.send(`Dùng: \`${prefix}ar create "hello" text|embed\``);
+    if (guildData[key]) return message.channel.send("AutoRes này đã tồn tại.");
+    guildData[key] = normalizeAutoResRecord({
+      trigger: args.join(" ").trim(),
+      type,
+      mode: "exact",
+      enabled: true,
+      content: "",
+      embed: { title: "", description: "", color: 0x5865f2, thumbnail: "", image: "", footer: "" },
+      createdAt: Date.now(),
+      createdBy: message.author.id,
+    });
+    saveAutoRes(autoRes);
+    return message.channel.send(`✅ Đã tạo AutoRes **${guildData[key].trigger}** dạng **${type}**.`);
+  }
+
+  if (sub === "list") {
+    const entries = Object.values(guildData);
+    if (!entries.length) return message.channel.send("🤖 Server chưa có AutoRes nào.");
+    const lines = entries.map((r, i) => `${i + 1}. ${r.enabled ? "🟢" : "🔴"} **${r.trigger}** — ${r.type} — ${r.mode}`);
+    return message.channel.send(`**🤖 AutoRes (${entries.length})**\n${lines.join("\n")}`);
+  }
+
+  if (sub === "delete") {
+    if (!record) return message.channel.send("Không tìm thấy AutoRes.");
+    removeLocalImage(record.embed.thumbnail);
+    removeLocalImage(record.embed.image);
+    delete guildData[normalizeTrigger(trigger)];
+    saveAutoRes(autoRes);
+    return message.channel.send(`🗑️ Đã xóa AutoRes **${record.trigger}**.`);
+  }
+
+  if (!record) return message.channel.send(`Không tìm thấy AutoRes. Dùng \`${prefix}ar list\` để xem danh sách.`);
+
+  if (sub === "on" || sub === "off") {
+    record.enabled = sub === "on";
+    saveAutoRes(autoRes);
+    return message.channel.send(`${record.enabled ? "🟢 Đã bật" : "🔴 Đã tắt"} AutoRes **${record.trigger}**.`);
+  }
+
+  if (sub === "type") {
+    const type = (args[1] || "").toLowerCase();
+    if (!["text", "embed"].includes(type)) return message.channel.send(`Dùng: \`${prefix}ar type "hello" text|embed\``);
+    record.type = type;
+    saveAutoRes(autoRes);
+    return message.channel.send(`✅ AutoRes **${record.trigger}** giờ là **${type}**.`);
+  }
+
+  if (sub === "mode") {
+    const mode = (args[1] || "").toLowerCase();
+    if (!["exact", "contains"].includes(mode)) return message.channel.send(`Dùng: \`${prefix}ar mode "hello" exact|contains\``);
+    record.mode = mode;
+    saveAutoRes(autoRes);
+    return message.channel.send(`✅ Trigger **${record.trigger}** dùng mode **${mode}**.`);
+  }
+
+  if (sub === "content") {
+    record.content = args.slice(1).join(" ").trim();
+    saveAutoRes(autoRes);
+    return message.channel.send(`✅ Đã cập nhật nội dung AutoRes **${record.trigger}**.`);
+  }
+
+  if (sub === "title" || sub === "desc" || sub === "footer") {
+    const value = args.slice(1).join(" ").trim();
+    const field = sub === "desc" ? "description" : sub;
+    record.embed[field] = value;
+    saveAutoRes(autoRes);
+    return message.channel.send(`✅ Đã cập nhật ${field} cho **${record.trigger}**.`);
+  }
+
+  if (sub === "color") {
+    const value = (args[1] || "").trim().toLowerCase();
+    if (value === "reset") record.embed.color = 0x5865f2;
+    else if (/^#?[0-9a-f]{6}$/i.test(value)) record.embed.color = parseInt(value.replace("#", ""), 16);
+    else return message.channel.send(`Dùng: \`${prefix}ar color "hello" #ff69b4\` hoặc \`reset\``);
+    saveAutoRes(autoRes);
+    return message.channel.send(`🎨 Đã cập nhật màu AutoRes **${record.trigger}**.`);
+  }
+
+  if (sub === "thumb" || sub === "image") {
+    const attachment = getAttachments(message)[0];
+    if (!attachment) return message.channel.send(`Hãy đính kèm ảnh cùng lệnh: \`${prefix}ar ${sub} "${record.trigger}"\``);
+    try {
+      const field = sub === "thumb" ? "thumbnail" : "image";
+      const old = record.embed[field];
+      const stored = await saveAutoResAttachment(record.trigger, field, attachment);
+      record.embed[field] = stored;
+      removeLocalImage(old);
+      saveAutoRes(autoRes);
+      return message.channel.send(`✅ Đã cập nhật ${sub === "thumb" ? "thumbnail" : "image"} cho AutoRes **${record.trigger}**.`);
+    } catch (error) {
+      console.error(error);
+      return message.channel.send("❌ Không thể lưu ảnh AutoRes.");
+    }
+  }
+
+  return message.channel.send(autoResHelp());
+}
+
+//autores: slash command "/ar" — tạo bằng modal, còn lại bằng option
+const pendingAutoResCreates = new Map();
+
+function buildAutoResCreateModal(type, token, trigger) {
+  const modal = new ModalBuilder()
+    .setCustomId(`ar_create_modal:${token}`)
+    .setTitle(type === "embed" ? "Tạo AutoRes Embed" : "Tạo AutoRes Text");
+
+  if (type === "text") {
+    const contentInput = new TextInputBuilder()
+      .setCustomId("content")
+      .setLabel("Nội dung AutoRes")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(4000);
+    modal.addComponents(new ActionRowBuilder().addComponents(contentInput));
+    return modal;
+  }
+
+  const fields = [
+    ["content", "Content", TextInputStyle.Paragraph, false, 4000],
+    ["title", "Title", TextInputStyle.Short, false, 256],
+    ["desc", "Description", TextInputStyle.Paragraph, false, 4000],
+    ["color", "Color HEX (vd #ff69b4)", TextInputStyle.Short, false, 20],
+    ["footer", "Footer", TextInputStyle.Short, false, 2048],
+  ];
+  for (const [id, label, style, required, maxLength] of fields) {
+    const input = new TextInputBuilder()
+      .setCustomId(id)
+      .setLabel(label)
+      .setStyle(style)
+      .setRequired(required)
+      .setMaxLength(maxLength);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+  }
+  return modal;
+}
+
+async function handleAutoResCreateModal(interaction) {
+  if (!interaction.isModalSubmit() || !interaction.customId.startsWith("ar_create_modal:")) return false;
+  const token = interaction.customId.slice("ar_create_modal:".length);
+  const pending = pendingAutoResCreates.get(token);
+  if (!pending) {
+    await interaction.reply({ content: "❌ Phiên tạo AutoRes đã hết hạn. Hãy dùng lại `/ar create`.", flags: MessageFlags.Ephemeral });
+    return true;
+  }
+  pendingAutoResCreates.delete(token);
+
+  if (pending.userId !== interaction.user.id || pending.guildId !== interaction.guildId) {
+    await interaction.reply({ content: "⛔ Bạn không thể dùng form AutoRes này.", flags: MessageFlags.Ephemeral });
+    return true;
+  }
+
+  const guildData = getGuildAutoRes(interaction.guild.id);
+  const key = normalizeTrigger(pending.trigger);
+  if (guildData[key]) {
+    await interaction.reply({ content: "⚠️ AutoRes này đã tồn tại.", flags: MessageFlags.Ephemeral });
+    return true;
+  }
+
+  const content = interaction.fields.getTextInputValue("content")?.trim() || "";
+  const title = pending.type === "embed" ? (interaction.fields.getTextInputValue("title")?.trim() || "") : "";
+  const desc = pending.type === "embed" ? (interaction.fields.getTextInputValue("desc")?.trim() || "") : "";
+  const colorValue = pending.type === "embed" ? (interaction.fields.getTextInputValue("color")?.trim().toLowerCase() || "") : "";
+  const footer = pending.type === "embed" ? (interaction.fields.getTextInputValue("footer")?.trim() || "") : "";
+
+  let color = 0x5865f2;
+  if (pending.type === "embed" && colorValue) {
+    if (colorValue === "reset") color = 0x5865f2;
+    else if (/^#?[0-9a-f]{6}$/i.test(colorValue)) color = parseInt(colorValue.replace("#", ""), 16);
+    else {
+      await interaction.reply({ content: "❌ Màu không hợp lệ. Dùng `#ff69b4` hoặc để trống.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+  }
+
+  guildData[key] = normalizeAutoResRecord({
+    trigger: pending.trigger,
+    type: pending.type,
+    mode: "exact",
+    enabled: true,
+    content,
+    embed: { title, description: desc, color, thumbnail: "", image: "", footer },
+    createdAt: Date.now(),
+    createdBy: interaction.user.id,
+  });
+  saveAutoRes(autoRes);
+
+  await interaction.reply({
+    content: `✅ Đã tạo AutoRes **${pending.trigger}** dạng **${pending.type}**${content ? " và đã đặt content." : "."}`,
+    flags: MessageFlags.Ephemeral,
+  });
+  return true;
+}
+
+async function handleAutoResSlash(interaction) {
+  if (!interaction.isChatInputCommand() || interaction.commandName !== "ar") return false;
+  if (!interaction.guild) {
+    await interaction.reply({ content: "❌ Lệnh này chỉ dùng trong server.", flags: MessageFlags.Ephemeral });
+    return true;
+  }
+
+  const action = interaction.options.getSubcommand();
+  const managerActions = ["create", "edit", "delete", "on", "off"];
+  if (managerActions.includes(action)) {
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => interaction.member);
+    if (!hasAutoResManagerRole({ guild: interaction.guild, member })) {
+      await interaction.reply({ content: "⛔ Bạn không có quyền AutoRes.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+  }
+
+  const guildData = getGuildAutoRes(interaction.guild.id);
+
+  if (action === "list") {
+    const entries = Object.values(guildData);
+    if (!entries.length) {
+      await interaction.reply("🤖 Server chưa có AutoRes nào.");
+      return true;
+    }
+    const lines = entries.map((r, i) => `${i + 1}. ${r.enabled ? "🟢" : "🔴"} **${r.trigger}** — ${r.type} — ${r.mode}`);
+    await interaction.reply(`**🤖 AutoRes (${entries.length})**\n${lines.join("\n")}`);
+    return true;
+  }
+
+  const trigger = interaction.options.getString("trigger", true).trim();
+  const key = normalizeTrigger(trigger);
+  const record = key ? findAutoRes(interaction.guild.id, trigger) : null;
+
+  if (action === "create") {
+    const type = interaction.options.getString("type", true);
+    if (!key) {
+      await interaction.reply({ content: "❌ Trigger không được để trống.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+    if (guildData[key]) {
+      await interaction.reply({ content: "⚠️ AutoRes này đã tồn tại.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    const token = `${interaction.user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+    pendingAutoResCreates.set(token, {
+      userId: interaction.user.id,
+      guildId: interaction.guild.id,
+      trigger,
+      type,
+      createdAt: Date.now(),
+    });
+    setTimeout(() => pendingAutoResCreates.delete(token), 5 * 60 * 1000);
+
+    await interaction.showModal(buildAutoResCreateModal(type, token, trigger));
+    return true;
+  }
+
+  if (!record) {
+    await interaction.reply({ content: "❌ Không tìm thấy AutoRes. Dùng `/ar list` để xem danh sách.", flags: MessageFlags.Ephemeral });
+    return true;
+  }
+
+  if (action === "delete") {
+    removeLocalImage(record.embed.thumbnail);
+    removeLocalImage(record.embed.image);
+    delete guildData[normalizeTrigger(record.trigger)];
+    saveAutoRes(autoRes);
+    await interaction.reply(`🗑️ Đã xóa AutoRes **${record.trigger}**.`);
+    return true;
+  }
+
+  if (action === "on" || action === "off") {
+    record.enabled = action === "on";
+    saveAutoRes(autoRes);
+    await interaction.reply(`${record.enabled ? "🟢 Đã bật" : "🔴 Đã tắt"} AutoRes **${record.trigger}**.`);
+    return true;
+  }
+
+  if (action === "edit") {
+    let changed = [];
+    const content = interaction.options.getString("content");
+    const title = interaction.options.getString("title");
+    const desc = interaction.options.getString("desc");
+    const color = interaction.options.getString("color");
+    const footer = interaction.options.getString("footer");
+    const type = interaction.options.getString("type");
+    const mode = interaction.options.getString("mode");
+    const thumbnail = interaction.options.getAttachment("thumbnail");
+    const image = interaction.options.getAttachment("image");
+
+    if (content !== null) { record.content = content.trim(); changed.push("content"); }
+    if (title !== null) { record.embed.title = title.trim(); changed.push("title"); }
+    if (desc !== null) { record.embed.description = desc.trim(); changed.push("desc"); }
+    if (footer !== null) { record.embed.footer = footer.trim(); changed.push("footer"); }
+    if (type !== null) { record.type = type; changed.push("type"); }
+    if (mode !== null) { record.mode = mode; changed.push("mode"); }
+
+    if (color !== null) {
+      const value = color.trim().toLowerCase();
+      if (value === "reset") record.embed.color = 0x5865f2;
+      else if (/^#?[0-9a-f]{6}$/i.test(value)) record.embed.color = parseInt(value.replace("#", ""), 16);
+      else {
+        await interaction.reply({ content: "❌ Màu không hợp lệ. Ví dụ `#ff69b4` hoặc `reset`.", flags: MessageFlags.Ephemeral });
+        return true;
+      }
+      changed.push("color");
+    }
+
+    try {
+      if (thumbnail) {
+        const old = record.embed.thumbnail;
+        record.embed.thumbnail = await saveAutoResAttachment(record.trigger, "thumbnail", thumbnail);
+        removeLocalImage(old);
+        changed.push("thumbnail");
+      }
+      if (image) {
+        const old = record.embed.image;
+        record.embed.image = await saveAutoResAttachment(record.trigger, "image", image);
+        removeLocalImage(old);
+        changed.push("image");
+      }
+    } catch (error) {
+      console.error(error);
+      await interaction.reply({ content: "❌ Không thể lưu ảnh AutoRes.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    if (!changed.length) {
+      await interaction.reply({ content: "ℹ️ Không có thông tin nào được thay đổi.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    saveAutoRes(autoRes);
+    await interaction.reply(`✅ Đã cập nhật **${record.trigger}**: ${changed.join(", ")}.`);
+    return true;
+  }
+
+  return true;
+}
+
+// ================== //autores: HẾT KHỐI TÍNH NĂNG AUTORES ==================
+
+// doc, ghi file warn
 let warns = {};
 const warnsFile = "./warns.json";
 
@@ -185,7 +788,7 @@ function saveWarns() {
     fs.writeFileSync(warnsFile, JSON.stringify(warns, null, 2));
 }
 
-// quan ly donate
+// quan ly donate (bỏ)
 let donates = {};
 const donatesFile = "./donates.json";
 
@@ -201,7 +804,7 @@ function saveDonates() {
     fs.writeFileSync(donatesFile, JSON.stringify(donates, null, 2));
 }
 
-// id role vip theo donate
+// id role vip theo donate (bỏ)
 const vipRoles = {
     1: "1529401042897211473",
     2: "1529401182156488764",
@@ -210,7 +813,7 @@ const vipRoles = {
     5: "1529401569970491432"
 };
 
-// ham tu dong add role khi du donate
+// ham tu dong add role khi du donate (bỏ)
 async function checkAndAssignVIP(member, totalAmount) {
     let targetTier = 0;
     if (totalAmount >= 300000) targetTier = 5;
@@ -230,7 +833,7 @@ async function checkAndAssignVIP(member, totalAmount) {
     }
 }
 
-// Lưu trữ các timeout của giveaway đang chạy để có thể hủy khi dùng lệnh gastop
+// timeout cua ga
 const activeGiveaways = new Map();
 
 async function tempReply(message, content, time = 5000) {
@@ -243,7 +846,7 @@ async function tempReply(message, content, time = 5000) {
     return msg;
 }
 
-// Hàm tạo hàng nút bấm cho lệnh hav (Đã gỡ emoji và đổi tên theo yêu cầu)
+// nut av
 function getHavActionRow(targetId) {
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`hav_uavatar_${targetId}`).setLabel("Avatar").setStyle(ButtonStyle.Primary),
@@ -253,7 +856,7 @@ function getHavActionRow(targetId) {
     );
 }
 
-// Hàm tạo embed trang chủ Help
+// embed help
 function getHomeEmbed(guild, client, prefix) {
     return new EmbedBuilder()
         .setColor("#481f86")
@@ -270,7 +873,7 @@ function getHomeEmbed(guild, client, prefix) {
         .setTimestamp();
 }
 
-// Hàm kết thúc giveaway chung
+// ham ket thuc chung cua ga
 async function finishGiveaway(channel, messageId, title, creator, winnerCount, giveawayMsg) {
     const fetchedMsg = await channel.messages.fetch(messageId).catch(() => null);
     if (!fetchedMsg) return;
@@ -347,15 +950,52 @@ async function finishGiveaway(channel, messageId, title, creator, winnerCount, g
     activeGiveaways.delete(messageId);
 }
 
-client.once("ready", () => {
+client.once("ready", async () => {
     console.log(`${client.user.tag} đã online!`);
+
+    //autores: đăng ký slash command "/ar" cho từng server
+    const arCommand = new SlashCommandBuilder()
+        .setName("ar")
+        .setDescription("Quản lý AutoRes (tự động trả lời theo trigger)")
+        .addSubcommand(sub => sub.setName("create").setDescription("Tạo AutoRes mới")
+            .addStringOption(opt => opt.setName("trigger").setDescription("Từ khóa kích hoạt").setRequired(true))
+            .addStringOption(opt => opt.setName("type").setDescription("Loại phản hồi").setRequired(true)
+                .addChoices({ name: "Text", value: "text" }, { name: "Embed", value: "embed" })))
+        .addSubcommand(sub => sub.setName("edit").setDescription("Sửa AutoRes")
+            .addStringOption(opt => opt.setName("trigger").setDescription("Trigger cần sửa").setRequired(true))
+            .addStringOption(opt => opt.setName("content").setDescription("Nội dung"))
+            .addStringOption(opt => opt.setName("title").setDescription("Tiêu đề embed"))
+            .addStringOption(opt => opt.setName("desc").setDescription("Mô tả embed"))
+            .addStringOption(opt => opt.setName("color").setDescription("Màu HEX (vd #ff69b4) hoặc reset"))
+            .addStringOption(opt => opt.setName("footer").setDescription("Footer embed"))
+            .addStringOption(opt => opt.setName("type").setDescription("Loại phản hồi")
+                .addChoices({ name: "Text", value: "text" }, { name: "Embed", value: "embed" }))
+            .addStringOption(opt => opt.setName("mode").setDescription("Cách khớp trigger")
+                .addChoices({ name: "Chính xác", value: "exact" }, { name: "Chứa chuỗi", value: "contains" }))
+            .addAttachmentOption(opt => opt.setName("thumbnail").setDescription("Ảnh thumbnail (embed)"))
+            .addAttachmentOption(opt => opt.setName("image").setDescription("Ảnh lớn (embed)")))
+        .addSubcommand(sub => sub.setName("delete").setDescription("Xóa AutoRes")
+            .addStringOption(opt => opt.setName("trigger").setDescription("Trigger cần xóa").setRequired(true)))
+        .addSubcommand(sub => sub.setName("on").setDescription("Bật AutoRes")
+            .addStringOption(opt => opt.setName("trigger").setDescription("Trigger cần bật").setRequired(true)))
+        .addSubcommand(sub => sub.setName("off").setDescription("Tắt AutoRes")
+            .addStringOption(opt => opt.setName("trigger").setDescription("Trigger cần tắt").setRequired(true)))
+        .addSubcommand(sub => sub.setName("list").setDescription("Xem danh sách AutoRes"));
+
+    for (const guild of client.guilds.cache.values()) {
+        try {
+            await guild.commands.create(arCommand.toJSON());
+        } catch (error) {
+            console.error(`[AutoRes] Không đăng ký /ar ở ${guild.name}:`, error.message || error);
+        }
+    }
 });
 
 client.on("messageCreate", async (message) => {
 
     if (message.author.bot) return;
 
-    // ===== PING / REPLY BOT =====
+    // ping bot
     const replied =
         message.reference &&
         (await message.fetchReference().catch(() => null));
@@ -376,12 +1016,30 @@ client.on("messageCreate", async (message) => {
         return;
     }
 
+    //autores: kiểm tra trigger tự động trả lời trước, không phụ thuộc prefix
+    if (message.guild) {
+        const matched = findMatchingAutoRes(message.guild.id, message.content);
+        if (matched) {
+            try {
+                await message.channel.send(autoResPayload(matched));
+            } catch (error) {
+                console.error("AutoRes gửi thất bại:", error);
+            }
+            return;
+        }
+    }
+
     if (!message.content.toLowerCase().startsWith(prefix.toLowerCase())) return;
 
     const args = message.content.slice(prefix.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // ===== BAN =====
+    //autores: lệnh prefix "${prefix}ar <sub> ..."
+    if (command === "ar") {
+        return handleAutoResCommand(message, parseAutoResArgs(message.content.slice(prefix.length + command.length).trim()));
+    }
+
+    // ban
     if (command === "ban") {
 
         if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers))
@@ -411,7 +1069,7 @@ client.on("messageCreate", async (message) => {
         return message.reply({ embeds: [embed] });
     }
 
-    // ===== UNBAN =====
+    // unban
     if (command === "unban") {
 
         if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers))
@@ -445,7 +1103,7 @@ client.on("messageCreate", async (message) => {
         }
     }
 
-    // ===== KICK =====
+    // kick
     if (command === "kick") {
 
               if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers))
@@ -475,7 +1133,7 @@ client.on("messageCreate", async (message) => {
         return message.reply({ embeds: [embed] });
     }
 
-    // ===== MUTE =====
+    // mute
 if (command === "mute") {
 
     if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
@@ -578,7 +1236,7 @@ if (command === "mute") {
     }
 }
 
-// ===== UNMUTE =====
+// unmute
     if (command === "unmute") {
 
         if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
@@ -595,7 +1253,7 @@ if (command === "mute") {
         const reason = args.slice(1).join(" ") || "Không có lý do.";
 
         try {
-            // Truyền null vào timeout để gỡ lệnh cấm chat
+
             await member.timeout(null, reason);
 
             const embed = new EmbedBuilder()
@@ -627,7 +1285,7 @@ if (command === "mute") {
         }
     }
 
-    // ===== WARN =====
+    // warn
     if (command === "warn") {
 
         if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
@@ -667,7 +1325,7 @@ if (command === "mute") {
         return message.reply({ embeds: [embed] });
     }
 
-    // ===== REMOVE WARN (hrwarn) =====
+    // xoa warn
     if (command === "rwarn") {
 
         if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
@@ -709,7 +1367,7 @@ if (command === "mute") {
         return message.reply({ embeds: [embed] });
     }
 
-    // ===== CHECK WARN (hcwarn) =====
+    // cwarn check warn
     if (command === "cwarn") {
 
         const member = message.mentions.members.first() || message.member;
@@ -738,7 +1396,7 @@ if (command === "mute") {
         return message.reply({ embeds: [embed] });
     }
 
-// ===== LOCK CHANNEL (hlock) =====
+// lock
     if (command === "lock") {
 
         if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
@@ -803,7 +1461,7 @@ if (command === "mute") {
         }
     }
 
-    // ===== UNLOCK CHANNEL (hunlock) =====
+    // unlock
     if (command === "unlock") {
 
         if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
@@ -868,7 +1526,7 @@ if (command === "mute") {
         }
     }
 
-    // ===== GIVEAWAY START (hgastart) =====
+    // ga start
     if (command === "gastart") {
 
         if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages))
@@ -946,7 +1604,7 @@ if (command === "mute") {
         return;
     }
 
-    // ===== GIVEAWAY STOP (hgastop) =====
+    // ga stop
     if (command === "gastop") {
         if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages))
             return tempReply(message, "❌ Bạn không có quyền quản lý tin nhắn để dừng giveaway!");
@@ -971,7 +1629,7 @@ if (command === "mute") {
         return tempReply(message, "✅ Đã dừng giveaway và công bố người chiến thắng thành công!");
     }
 
-    // ===== GIVEAWAY REROLL (hgareroll) =====
+    // ga rr
     if (command === "gareroll") {
         if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages))
             return tempReply(message, "❌ Bạn không có quyền quản lý tin nhắn để quay lại người thắng giveaway!");
@@ -1010,7 +1668,7 @@ if (command === "mute") {
         return message.reply(`Reroll! Chúc mừng, ${winnerMention} đã thắng giveaway **${title}** tổ chức bởi ${creator}`);
     }
 
-    // ===== YÊU CẦU XEM AVATAR (av) =====
+    // av
     if (command === "av") {
         const repliedMessage = message.reference ? await message.fetchReference().catch(() => null) : null;
         const targetUser = repliedMessage ? repliedMessage.author : (message.mentions.users.first() || message.author);
@@ -1018,7 +1676,7 @@ if (command === "mute") {
         if (targetUser.bot)
             return tempReply(message, "❌ Không thể yêu cầu xem avatar của bot!");
 
-        // Nếu tự xem chính mình (không tag ai, không reply ai hoặc tag chính mình)
+        // soi av cua minh
         if (targetUser.id === message.author.id) {
             const fetchedTarget = await targetUser.fetch().catch(() => targetUser);
             const avatarURL = fetchedTarget.displayAvatarURL({ size: 1024, dynamic: true });
@@ -1038,7 +1696,7 @@ if (command === "mute") {
             return message.reply({ embeds: [embed], components: [row] });
         }
 
-        // Xem avatar người khác -> Cần chấp thuận
+        // soi av acp
         const embed = new EmbedBuilder()
             .setColor("#481f86")
             .setTitle("Yêu cầu xem avatar")
@@ -1064,10 +1722,9 @@ if (command === "mute") {
         });
     }
 
-// ===== ROLE (hrole - Hỗ trợ Temp Role) =====
+// role & temp
 else if (command === "role") {
 
-    // Kiểm tra quyền người sử dụng
     if (!message.member.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
@@ -1080,10 +1737,8 @@ else if (command === "role") {
         return message.reply({ embeds: [errEmbed] });
     }
 
-    // Lấy thành viên được mention
     const targetMember = message.mentions.members.first();
 
-    // Xác định phần text còn lại sau khi bỏ command và mention (nếu có)
     let queryArgs = targetMember ? args.slice(1) : [...args];
 
     if (queryArgs.length === 0) {
@@ -1099,7 +1754,6 @@ else if (command === "role") {
         return message.reply({ embeds: [errEmbed] });
     }
 
-    // Kiểm tra xem từ cuối cùng có phải là thời gian không (ví dụ: 10s, 5m, 2h, 1d)
     let durationMs = 0;
     let timeString = "";
     const lastArg = queryArgs[queryArgs.length - 1];
@@ -1116,7 +1770,7 @@ else if (command === "role") {
         else if (unit === 'd') durationMs = value * 24 * 60 * 60 * 1000;
 
         timeString = lastArg;
-        queryArgs.pop(); // Bỏ phần thời gian ra khỏi mảng tên role
+        queryArgs.pop(); 
     }
 
     const roleQuery = queryArgs.join(" ").trim();
@@ -1129,10 +1783,8 @@ else if (command === "role") {
         return message.reply({ embeds: [errEmbed] });
     }
 
-    // Người được thay đổi role
     const memberToModify = targetMember || message.member;
 
-    // Tìm role theo tên (cho phép viết tắt từ đầu hoặc gõ từ khóa)
     const roleToModify = message.guild.roles.cache.find(
         role => 
             role.name.toLowerCase().startsWith(roleQuery.toLowerCase()) || 
@@ -1148,7 +1800,6 @@ else if (command === "role") {
         return message.reply({ embeds: [errEmbed] });
     }
 
-    // Lấy bot member
     const botMember = message.guild.members.me;
 
     if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
@@ -1160,7 +1811,6 @@ else if (command === "role") {
         return message.reply({ embeds: [errEmbed] });
     }
 
-    // Không thể thao tác với @everyone hoặc managed role
     if (roleToModify.id === message.guild.id || roleToModify.managed) {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
@@ -1170,7 +1820,7 @@ else if (command === "role") {
         return message.reply({ embeds: [errEmbed] });
     }
 
-    // Phân cấp role
+    // phan cap
     if (roleToModify.position >= botMember.roles.highest.position) {
         const errEmbed = new EmbedBuilder()
             .setColor("#ff0000")
@@ -1181,7 +1831,7 @@ else if (command === "role") {
     }
 
     try {
-        // Nếu đã có role -> GỠ ROLE (Hủy bỏ temp role nếu đang có)
+        // go role
         if (memberToModify.roles.cache.has(roleToModify.id)) {
             await memberToModify.roles.remove(roleToModify, `Role removed by ${message.author.tag}`);
 
@@ -1198,7 +1848,7 @@ else if (command === "role") {
             return message.reply({ embeds: [embed] });
         }
 
-        // Nếu chưa có role -> THÊM ROLE
+        // add role 
         await memberToModify.roles.add(roleToModify, `Role added by ${message.author.tag}`);
 
         const embed = new EmbedBuilder()
@@ -1213,7 +1863,7 @@ else if (command === "role") {
 
         message.reply({ embeds: [embed] });
 
-// Xử lý tự động gỡ role nếu có thiết lập thời gian (Temp Role)
+// Temp Role
         if (durationMs > 0) {
             setTimeout(async () => {
                 try {
@@ -1252,114 +1902,8 @@ else if (command === "role") {
     }
 }
 
-// ===== DN (Ghi donate & Tự động cấp Role VIP) =====
-if (command === "dn") {
-        if (
-            !message.member.permissions.has(PermissionsBitField.Flags.ManageMessages) &&
-            !message.member.permissions.has(PermissionsBitField.Flags.Administrator)
-        ) {
-            return tempReply(message, "❌ Lệnh ghi donate chỉ các Support/Admin được dùng.");
-        }
 
-        const member = message.mentions.members.first();
-        if (!member)
-            return tempReply(message, `❌ Hãy mention thành viên cần ghi donate. (Ví dụ: \`${prefix}dn @user 50k\` hoặc \`${prefix}dn @user 5tr\`)`);
-
-        const rawAmount = args[1];
-        if (!rawAmount)
-            return tempReply(message, `❌ Vui lòng nhập số tiền donate! (Ví dụ: \`${prefix}dn @user 50k\` hoặc \`${prefix}dn @user 5tr\`)`);
-
-        // Xử lý chuỗi tiền tệ (hỗ trợ k, tr, m và số thường)
-        let cleanAmount = rawAmount.toLowerCase().replace(/,/g, '').replace(/\./g, '');
-        let multiplier = 1;
-
-        if (cleanAmount.endsWith('k')) {
-            multiplier = 1000;
-            cleanAmount = cleanAmount.slice(0, -1);
-        } else if (cleanAmount.endsWith('tr') || cleanAmount.endsWith('m')) {
-            multiplier = 1000000;
-            cleanAmount = cleanAmount.endsWith('tr') ? cleanAmount.slice(0, -2) : cleanAmount.slice(0, -1);
-        }
-
-        const amount = parseInt(cleanAmount) * multiplier;
-        if (isNaN(amount) || amount <= 0)
-            return tempReply(message, "❌ Số tiền donate không hợp lệ! (Ví dụ: `10k`, `100k`, `1tr`, `10tr`)");
-
-        // Cập nhật tổng tiền donate của user vào object
-        if (!donates[member.id]) {
-            donates[member.id] = 0;
-        }
-        donates[member.id] += amount;
-        saveDonates();
-
-        // Tự động kiểm tra và cấp role VIP nếu đạt mốc
-        await checkAndAssignVIP(member, donates[member.id]);
-
-        // Format số tiền có dấu phẩy ngăn cách hàng nghìn
-        const formattedAmount = amount.toLocaleString("en-US");
-        const formattedTotal = donates[member.id].toLocaleString("en-US");
-
-        // Giữ lại tin nhắn lệnh và phản hồi kèm tag người chạy lệnh
-        return message.reply(`<a:tikhong:1542901135088812092> ${message.author} Đã ghi donate cho ${member} : **+${formattedAmount}** (tổng: **${formattedTotal}**)`);
-    }
-
-    // ===== XOADN (Xóa/Trừ bớt donate) =====
-    if (command === "xoadn") {
-        if (
-            !message.member.permissions.has(PermissionsBitField.Flags.ManageMessages) &&
-            !message.member.permissions.has(PermissionsBitField.Flags.Administrator)
-        ) {
-            return tempReply(message, "❌ Lệnh xóa donate chỉ các Support/Admin được dùng.");
-        }
-
-        const member = message.mentions.members.first();
-        if (!member)
-            return tempReply(message, `❌ Hãy mention thành viên cần xóa/trừ donate. (Ví dụ: \`${prefix}xoadn @user 30k\` hoặc \`${prefix}xoadn @user 1tr\`)`);
-
-        const rawAmount = args[1];
-        if (!rawAmount)
-            return tempReply(message, `❌ Vui lòng nhập số tiền cần trừ! (Ví dụ: \`${prefix}xoadn @user 30k\` hoặc \`${prefix}xoadn @user 1tr\`)`);
-
-        // Xử lý chuỗi tiền tệ (hỗ trợ k, tr, m và số thường)
-        let cleanAmount = rawAmount.toLowerCase().replace(/,/g, '').replace(/\./g, '');
-        let multiplier = 1;
-
-        if (cleanAmount.endsWith('k')) {
-            multiplier = 1000;
-            cleanAmount = cleanAmount.slice(0, -1);
-        } else if (cleanAmount.endsWith('tr') || cleanAmount.endsWith('m')) {
-            multiplier = 1000000;
-            cleanAmount = cleanAmount.endsWith('tr') ? cleanAmount.slice(0, -2) : cleanAmount.slice(0, -1);
-        }
-
-        const amount = parseInt(cleanAmount) * multiplier;
-        if (isNaN(amount) || amount <= 0)
-            return tempReply(message, "❌ Số tiền không hợp lệ! (Ví dụ: `30k`, `100k`, `1tr`)");
-
-        // Kiểm tra xem user có dữ liệu donate chưa
-        if (!donates[member.id] || donates[member.id] <= 0) {
-            return tempReply(message, `❌ Thành viên ${member} hiện không có lịch sử donate nào để trừ!`);
-        }
-
-        // Trừ tiền donate (không để tổng tiền bị âm dưới 0)
-        donates[member.id] -= amount;
-        if (donates[member.id] < 0) {
-            donates[member.id] = 0;
-        }
-        saveDonates();
-
-        // (Tùy chọn) Có thể gọi lại hàm checkAndAssignVIP nếu muốn hạ cấp role khi tụt mốc, 
-        // nhưng hiện tại để đơn giản hệ thống chỉ trừ tiền và lưu file.
-
-        // Format số tiền có dấu phẩy ngăn cách hàng nghìn
-        const formattedAmount = amount.toLocaleString("en-US");
-        const formattedTotal = donates[member.id].toLocaleString("en-US");
-
-        // Giữ lại tin nhắn lệnh và phản hồi theo đúng định dạng yêu cầu
-        return message.reply(`<a:tikhong:1542901135088812092> ${message.author} Đã xóa donate cho ${member} : **-${formattedAmount}** (tổng: **${formattedTotal}**)`);
-    }
-
-    // ===== HELP (CÓ MENU TƯƠNG TÁC) =====
+    // help
     if (command === "help") {
         const embed = getHomeEmbed(message.guild, client, prefix);
 
@@ -1400,9 +1944,13 @@ if (command === "dn") {
 
 });
 
-// ===== XỬ LÝ SỰ KIỆN TƯƠNG TÁC (MENU & BUTTON) =====
+// nut help
 client.on("interactionCreate", async (interaction) => {
-    // 1. Xử lý Select Menu (Help)
+    //autores: xử lý slash "/ar" và modal tạo AutoRes
+    if (await handleAutoResSlash(interaction)) return;
+    if (await handleAutoResCreateModal(interaction)) return;
+
+    // xu ly select nut help
     if (interaction.isStringSelectMenu()) {
         if (interaction.customId === "help_menu") {
             const selected = interaction.values[0];
@@ -1509,11 +2057,11 @@ client.on("interactionCreate", async (interaction) => {
         return;
     }
 
-    // 2. Xử lý Button
+    // xu ly nut
     if (interaction.isButton()) {
         const customId = interaction.customId;
 
-        // Xử lý Chấp nhận / Từ chối yêu cầu xem avatar người khác
+        // soi av (acp/deny)
         if (customId.startsWith("av_accept_") || customId.startsWith("av_deny_")) {
             const parts = customId.split("_");
             const action = parts[1]; // accept hoặc deny
@@ -1563,7 +2111,7 @@ client.on("interactionCreate", async (interaction) => {
             }
         }
 
-        // Xử lý các nút chuyển đổi (Avatar, Banner, Server Avatar, Server Banner)
+        // nut doi  Banner, Server Avatar, Server Banner
         if (
             customId.startsWith("hav_uavatar_") ||
             customId.startsWith("hav_ubanner_") ||
@@ -1571,7 +2119,7 @@ client.on("interactionCreate", async (interaction) => {
             customId.startsWith("hav_sbanner_")
         ) {
             const parts = customId.split("_");
-            const type = parts[1]; // uavatar, ubanner, savatar, sbanner
+            const type = parts[1]; // uavatar, ubanner, svavatar,svbanner
             const targetUserId = parts[2];
 
             const targetUserObj = await client.users.fetch(targetUserId).catch(() => null);
