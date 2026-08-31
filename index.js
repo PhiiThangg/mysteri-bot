@@ -1910,6 +1910,80 @@ else if (command === "role") {
     }
 }
 
+// ===== STEAL EMOJI / STICKER VỚI TÊN TÙY CHỈNH =====
+    else if (command === 'steal') {
+        if (message.author.id !== OWNER_ID && !message.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
+            return message.reply("⚠️ Bạn không có quyền dùng lệnh steal emoji/sticker!");
+        }
+
+        let targetMsg = message;
+        if (message.reference) {
+            targetMsg = await message.fetchReference().catch(() => message);
+        }
+
+        // 1. XỬ LÝ NẾU LÀ STICKER
+        const sticker = targetMsg.stickers.first() || message.stickers.first();
+        if (sticker) {
+            let stickerName = args[0] ? args.join("_") : (sticker.name || "stolen_sticker");
+            try {
+                await message.guild.stickers.create({
+                    file: sticker.url,
+                    name: stickerName
+                });
+                return message.reply(`✅ Đã thêm sticker với tên **${stickerName}** vào server thành công!`);
+            } catch (error) {
+                console.error(error);
+                return message.reply("❌ Không thể thêm sticker này!");
+            }
+        }
+
+        // 2. XỬ LÝ EMOJI
+        const textToCheck = targetMsg.content + " " + message.content;
+        const emojiRegex = /<a?:([a-zA-Z0-9_]+):([0-9]+)>/g;
+        const matches = [...textToCheck.matchAll(emojiRegex)];
+
+        if (matches.length === 0) {
+            return message.reply("⚠️ Không tìm thấy emoji nào! Hãy dùng cú pháp: `hsteal <emoji> <tên_mới>` hoặc reply vào tin nhắn chứa emoji.");
+        }
+
+        const match = matches[0];
+        const originalName = match[1];
+        const emojiId = match[2];
+        const animated = match[0].startsWith('<a:');
+        const extension = animated ? 'gif' : 'png';
+        const emojiUrl = `https://cdn.discordapp.com/emojis/${emojiId}.${extension}`;
+
+        // Xác định tên mới do người dùng truyền vào
+        let newName = originalName;
+        if (args.length > 0) {
+            // Kiểm tra xem arg đầu tiên có phải là chuỗi chứa emoji hay không
+            const hasEmojiInArg0 = emojiRegex.test(args[0]);
+            if (hasEmojiInArg0) {
+                // Trường hợp: hsteal <emoji> tên_mới_ở_đây
+                if (args.length > 1) {
+                    newName = args.slice(1).join("_");
+                }
+            } else {
+                // Trường hợp: Reply tin nhắn rồi gõ hsteal tên_mới_ở_đây
+                newName = args.join("_");
+            }
+        }
+
+        // Làm sạch tên (Discord chỉ cho phép chữ cái, số và dấu gạch dưới _)
+        newName = newName.replace(/[^a-zA-Z0-9_]/g, '_');
+        if (newName.length < 2) newName = originalName;
+
+        try {
+            const createdEmoji = await message.guild.emojis.create({
+                attachment: emojiUrl,
+                name: newName
+            });
+            return message.reply(`✅ Đã steal thành công emoji thành ${createdEmoji} với tên mới: \`${newName}\`!`);
+        } catch (error) {
+            console.error(error);
+            return message.reply("❌ Không thể thêm emoji! (Có thể server đã đầy slot emoji hoặc tên không hợp lệ).");
+        }
+    }
 
     // help
     if (command === "help") {
