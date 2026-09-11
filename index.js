@@ -213,6 +213,11 @@ function isImageAttachment(a) {
   return /\.(png|jpe?g|gif|webp)$/i.test(a.name || "");
 }
 
+function isVideoAttachment(a) {
+  if (a.contentType?.startsWith("video/")) return true;
+  return /\.(mp4|webm|mov|mkv)$/i.test(a.name || "");
+}
+
 function getAttachments(message) {
   return [...message.attachments.values()].filter(isImageAttachment);
 }
