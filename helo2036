@@ -1,0 +1,1097 @@
+require("dotenv").config();
+
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+  AttachmentBuilder,
+  ContainerBuilder,
+  SectionBuilder,
+  TextDisplayBuilder,
+  ThumbnailBuilder,
+  MediaGalleryBuilder,
+  MediaGalleryItemBuilder,
+  SeparatorBuilder,
+  MessageFlags,
+  SlashCommandBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  AuditLogEvent,
+  ChannelType,
+  PermissionsBitField,
+} = require("discord.js");
+const fs = require("fs");
+const path = require("path");
+const http = require("http");
+const crypto = require("crypto");
+const chokidar = require("chokidar");
+const { Octokit } = require("@octokit/rest");
+
+const TOKEN = process.env.TOKEN;
+const prefix = (process.env.prefix || "h").replace(/^!/, "").trim() || "h";
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions
+  ]
+});
+
+// ===== Railway -> GitHub: debounce 2 phút sau lần thay đổi cuối =====
+const DATA_DIR = path.join(__dirname, "..", "data");
+const GITHUB_SYNC_BRANCH = process.env.GITHUB_BRANCH || "main";
+const GITHUB_SYNC_DELAY = 2 * 60 * 1000;
+const githubClient = process.env.GITHUB_TOKEN
+  ? new Octokit({ auth: process.env.GITHUB_TOKEN })
+  : null;
+let githubSyncTimer = null;
+let githubSyncPending = false;
+let githubSyncRunning = false;
+
+function queueGitHubSync() {
+  githubSyncPending = true;
+  if (githubSyncTimer) clearTimeout(githubSyncTimer);
+  console.log("[GitHub Sync] Có thay đổi data -> reset timer 2 phút.");
+  githubSyncTimer = setTimeout(() => {
+    githubSyncTimer = null;
+    runGitHubDataSync().catch(error => {
+      console.error("[GitHub Sync]", error?.response?.data || error?.message || error);
+    });
+  }, GITHUB_SYNC_DELAY);
+}
+
+function getGitHubDataPath(filePath) {
+  const relativePath = path.relative(DATA_DIR, filePath).split(path.sep).join("/");
+  return `data/${relativePath}`;
+}
+
+async function runGitHubDataSync() {
+  if (!githubClient || !githubSyncPending || githubSyncRunning) return;
+  githubSyncPending = false;
+  githubSyncRunning = true;
+  try {
+    if (!process.env.GITHUB_OWNER || !process.env.GITHUB_REPO) {
+      console.error("[GitHub Sync] Thiếu GITHUB_OWNER hoặc GITHUB_REPO.");
+      return;
+    }
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const owner = process.env.GITHUB_OWNER;
+    const repo = process.env.GITHUB_REPO;
+    const ref = await githubClient.git.getRef({ owner, repo, ref: `heads/${GITHUB_SYNC_BRANCH}` });
+    const baseCommitSha = ref.data.object.sha;
+    const baseCommit = await githubClient.git.getCommit({ owner, repo, commit_sha: baseCommitSha });
+    const treeResult = await githubClient.git.getTree({
+      owner, repo, tree_sha: baseCommit.data.tree.sha, recursive: true,
+    });
+
+    const localFiles = new Map();
+    const walk = dir => {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.isFile()) localFiles.set(getGitHubDataPath(full), full);
+      }
+    };
+    walk(DATA_DIR);
+
+    const existingDataPaths = new Set((treeResult.data.tree || [])
+      .filter(item => item.type === "blob" && item.path.startsWith("data/"))
+      .map(item => item.path));
+
+    const tree = [];
+    for (const [githubPath, filePath] of localFiles) {
+      const blob = await githubClient.git.createBlob({
+        owner, repo,
+        content: fs.readFileSync(filePath).toString("base64"),
+        encoding: "base64",
+      });
+      tree.push({ path: githubPath, mode: "100644", type: "blob", sha: blob.data.sha });
+    }
+    for (const githubPath of existingDataPaths) {
+      if (!localFiles.has(githubPath)) {
+        tree.push({ path: githubPath, mode: "100644", type: "blob", sha: null });
+      }
+    }
+    if (!tree.length) {
+      console.log("[GitHub Sync] Không có file data để sync.");
+      return;
+    }
+
+    const newTree = await githubClient.git.createTree({
+      owner, repo, base_tree: baseCommit.data.tree.sha, tree,
+    });
+    if (newTree.data.sha === baseCommit.data.tree.sha) {
+      console.log("[GitHub Sync] Không có thay đổi thực tế để commit.");
+      return;
+    }
+
+    const commit = await githubClient.git.createCommit({
+      owner, repo,
+      message: "Auto sync data (debounced 2m)",
+      tree: newTree.data.sha,
+      parents: [baseCommitSha],
+    });
+    await githubClient.git.updateRef({
+      owner, repo, ref: `heads/${GITHUB_SYNC_BRANCH}`, sha: commit.data.sha, force: false,
+    });
+    console.log(`[GitHub Sync] Đã commit ${commit.data.sha} sau 2 phút hệ thống yên.`);
+  } finally {
+    githubSyncRunning = false;
+    if (githubSyncPending && !githubSyncTimer) queueGitHubSync();
+  }
+}
+
+function startGitHubDataWatcher() {
+  if (!githubClient) {
+    console.log("[GitHub Sync] GITHUB_TOKEN chưa được cấu hình, bỏ qua auto sync.");
+    return;
+  }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  chokidar.watch(DATA_DIR, {
+    ignoreInitial: true,
+    persistent: true,
+    awaitWriteFinish: { stabilityThreshold: 1000, pollInterval: 100 },
+  })
+    .on("add", () => queueGitHubSync())
+    .on("change", () => queueGitHubSync())
+    .on("unlink", () => queueGitHubSync());
+  console.log("[GitHub Sync] Theo dõi data/. Commit sau 2 phút kể từ lần thay đổi cuối.");
+}
+
+startGitHubDataWatcher();
+
+// nut check av banner user server
+function getHavActionRow(targetId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`hav_uavatar_${targetId}`).setLabel("Avatar").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`hav_ubanner_${targetId}`).setLabel("Banner").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`hav_savatar_${targetId}`).setLabel("Server Avatar").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`hav_sbanner_${targetId}`).setLabel("Server Banner").setStyle(ButtonStyle.Secondary)
+    );
+}
+
+// embed help
+function getHomeEmbed(guild, client, prefix) {
+    return new EmbedBuilder()
+        .setColor("#481f86")
+        .setAuthor({ 
+            name: guild.name, 
+            iconURL: guild.iconURL({ dynamic: true }) 
+        })
+        .setDescription(
+            `## **Danh sách các lệnh của bot**\n` +
+            `## <a:trangtim:1529563713516998779> prefix : \`${prefix}\`\n` +
+            `**__Bot được dev bởi :__ <@1530444381343973378> dzai vai lon**`
+        )
+        .setFooter({ text: `Tổng 4 danh mục lệnh`, iconURL: client.user.displayAvatarURL() })
+        .setTimestamp();
+}
+
+    // ping reply
+    const replied =
+        message.reference &&
+        (await message.fetchReference().catch(() => null));
+
+    if (
+        message.mentions.has(client.user) ||
+        (replied && replied.author.id === client.user.id)
+    ) {
+
+        const reply = await message.reply(
+            `Xin chào ${message.author} | Mình là bot của server, prefix ở server là: \`${prefix}\`. Có thể xem các lệnh tại \`${prefix}help\`.`
+        );
+
+        setTimeout(() => {
+            reply.delete().catch(() => { });
+        }, 5000);
+
+        return;
+    }
+
+    if (!message.content.toLowerCase().startsWith(prefix.toLowerCase())) return;
+
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+
+    // ban (cut khoi svlove di thg loz =)) )
+    if (command === "ban") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers))
+            return tempReply(
+                message,
+                `❌ Bạn không có quyền để sử dụng lệnh này!\n\n📌 Quyền hạn: Cấm thành viên.`
+            );
+
+        const member = message.mentions.members.first();
+
+        if (!member)
+            return tempReply(message, "❌ Hãy mention người cần ban.");
+
+        const reason = args.slice(1).join(" ") || "Không có lý do.";
+
+        await member.ban({ reason });
+
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setTitle("🔨 Ban thành công")
+            .setDescription(`${member} đã bị ban.`)
+            .addFields(
+                { name: "<a:camap:1529737268892274890> Moderator", value: message.author.tag, inline: true },
+                { name: "📝 Lý do", value: reason, inline: true }
+            );
+
+        return message.reply({ embeds: [embed] });
+    }
+
+    // unban
+    if (command === "unban") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers))
+            return tempReply(
+                message,
+                `❌ Bạn không có quyền để sử dụng lệnh này!\n\n📌 Quyền hạn: Cấm thành viên (Unban).`
+            );
+
+        const userId = args[0];
+
+        if (!userId)
+            return tempReply(message, "❌ Hãy nhập ID của người cần unban. (Ví dụ: `hunban 123456789012345678`)");
+
+        const reason = args.slice(1).join(" ") || "Không có lý do.";
+
+        try {
+            await message.guild.members.unban(userId, reason);
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle("🔓 Unban thành công")
+                .setDescription(`Đã gỡ ban thành công cho người dùng có ID: \`${userId}\``)
+                .addFields(
+                    { name: "<a:camap:1529737268892274890> Moderator", value: message.author.tag, inline: true },
+                    { name: "📝 Lý do", value: reason, inline: true }
+                );
+
+            return message.reply({ embeds: [embed] });
+        } catch (error) {
+            return tempReply(message, "❌ Không tìm thấy ID này trong danh sách bị ban hoặc ID không hợp lệ!");
+        }
+    }
+
+    // đá 
+    if (command === "kick") {
+
+              if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers))
+            return tempReply(
+                message,
+                `❌ Bạn không có quyền để sử dụng lệnh này!\n\n📌 Quyền hạn: Kick thành viên (kick).`
+            );
+
+        const member = message.mentions.members.first();
+
+        if (!member)
+            return tempReply(message, "❌ Hãy mention người cần kick.");
+
+        const reason = args.slice(1).join(" ") || "Không có lý do.";
+
+        await member.kick(reason);
+
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setTitle("👢 Kick thành công")
+            .setDescription(`${member} đã bị kick.`)
+            .addFields(
+                { name: "<a:camap:1529737268892274890> Moderator", value: message.author.tag, inline: true },
+                { name: "📝 Lý do", value: reason, inline: true }
+            );
+
+        return message.reply({ embeds: [embed] });
+    }
+
+    // rọ mỏm thg ngu
+if (command === "mute") {
+
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
+        return tempReply(
+            message,
+            `❌ Bạn không có quyền để sử dụng lệnh này!\n\n📌 Quyền hạn: Hạn chế thành viên`
+        );
+
+    const member = message.mentions.members.first();
+
+    if (!member)
+        return tempReply(message, "❌ Hãy mention người cần mute.");
+
+    const timeArg = args[1];
+
+    if (!timeArg)
+        return tempReply(
+            message,
+            "❌ Hãy nhập thời gian.\nVí dụ: `hmute @user 30s`, `hmute @user 10m`, `hmute @user 36h`."
+        );
+
+    // s = giay m = phut h = gio
+    const match = timeArg.match(/^(\d+)(s|m|h)$/i);
+
+    if (!match)
+        return tempReply(
+            message,
+            "❌ Thời gian không hợp lệ.\nDùng `s` = giây, `m` = phút, `h` = giờ."
+        );
+
+    const amount = Number(match[1]);
+    const unit = match[2].toLowerCase();
+
+    let durationMs;
+
+    if (unit === "s") {
+        durationMs = amount * 1000;
+    } else if (unit === "m") {
+        durationMs = amount * 60 * 1000;
+    } else {
+        durationMs = amount * 60 * 60 * 1000;
+    }
+
+    // gioi han timeout 28 ngay`
+    if (
+        durationMs <= 0 ||
+        durationMs > 28 * 24 * 60 * 60 * 1000
+    ) {
+        return tempReply(
+            message,
+            "❌ Thời gian mute phải từ 1 giây đến tối đa 28 ngày."
+        );
+    }
+
+    const reason = args.slice(2).join(" ") || "Không có lý do.";
+
+    try {
+        await member.timeout(durationMs, reason);
+
+        let unitName;
+
+        if (unit === "s") {
+            unitName = "giây";
+        } else if (unit === "m") {
+            unitName = "phút";
+        } else {
+            unitName = "giờ";
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setTitle("🔇 Mute thành công")
+            .setDescription(`${member} đã bị mute.`)
+            .addFields(
+                {
+                    name: "⏱️ Thời gian",
+                    value: `${amount} ${unitName}`,
+                    inline: true
+                },
+                {
+                    name: "<a:camap:1529737268892274890> Moderator",
+                    value: message.author.tag,
+                    inline: true
+                },
+                {
+                    name: "📝 Lý do",
+                    value: reason
+                }
+            );
+
+        return message.reply({ embeds: [embed] });
+
+    } catch (error) {
+        console.error("[MUTE ERROR]", error);
+
+        return tempReply(
+            message,
+            "❌ Không thể mute thành viên này. Hãy kiểm tra quyền `Moderate Members` và vị trí role của bot."
+        );
+    }
+}
+
+// unmute
+    if (command === "unmute") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
+            return tempReply(
+                message,
+                `❌ Bạn không có quyền để sử dụng lệnh này!\n\n📌 Quyền hạn: Hạn chế thành viên (Moderate Members)`
+            );
+
+        const member = message.mentions.members.first();
+
+        if (!member)
+            return tempReply(message, "❌ Hãy mention người cần unmute.");
+
+        const reason = args.slice(1).join(" ") || "Không có lý do.";
+
+        try {
+            // Truyền null vào timeout để gỡ lệnh cấm chat
+            await member.timeout(null, reason);
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle("🔊 Unmute thành công")
+                .setDescription(`${member} đã được gỡ mute.`)
+                .addFields(
+                    {
+                        name: "<a:camap:1529737268892274890> Moderator",
+                        value: message.author.tag,
+                        inline: true
+                    },
+                    {
+                        name: "📝 Lý do",
+                        value: reason,
+                        inline: true
+                    }
+                );
+
+            return message.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error("[UNMUTE ERROR]", error);
+
+            return tempReply(
+                message,
+                "❌ Không thể unmute thành viên này. Hãy kiểm tra quyền `Moderate Members` và vị trí role của bot."
+            );
+        }
+    }
+// lock kenh
+    if (command === "lock") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Không có quyền")
+                .setDescription(
+                    "Bạn không có quyền để sử dụng lệnh này!\n\n" +
+                    "📌 Quyền hạn: Quản lý kênh (Manage Channels)."
+                );
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+
+        const targetChannel = message.mentions.channels.first() || message.channel;
+        const botMember = message.guild.members.me;
+
+        if (!botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Bot thiếu quyền")
+                .setDescription("Bot cần quyền **Manage Channels** để khóa kênh.");
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+
+        try {
+            await targetChannel.permissionOverwrites.edit(message.guild.roles.everyone, {
+                SendMessages: false
+            }, { reason: `Locked by ${message.author.tag}` });
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle("<a:tikhong:1542901135088812092> Khóa kênh thành công")
+                .setDescription(
+                    `Đã khóa kênh ${targetChannel}.`
+                )
+                .addFields(
+                    {
+                        name: "<a:camap:1529737268892274890> Moderator",
+                        value: message.author.tag,
+                        inline: true
+                    },
+                    {
+                        name: "<a:hoatim:1529735587026964491> Kênh",
+                        value: targetChannel.name,
+                        inline: true
+                    }
+                )
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error("[LOCK ERROR]", error);
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Không thể khóa kênh")
+                .setDescription("Đã xảy ra lỗi khi khóa kênh này.");
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+    }
+
+    // unlock kenh
+    if (command === "unlock") {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Không có quyền")
+                .setDescription(
+                    "Bạn không có quyền để sử dụng lệnh này!\n\n" +
+                    "📌 Quyền hạn: Quản lý kênh (Manage Channels)."
+                );
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+
+        const targetChannel = message.mentions.channels.first() || message.channel;
+        const botMember = message.guild.members.me;
+
+        if (!botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Bot thiếu quyền")
+                .setDescription("Bot cần quyền **Manage Channels** để mở khóa kênh.");
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+
+        try {
+            await targetChannel.permissionOverwrites.edit(message.guild.roles.everyone, {
+                SendMessages: null
+            }, { reason: `Unlocked by ${message.author.tag}` });
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle("<a:tikhong:1542901135088812092> Mở khóa kênh thành công")
+                .setDescription(
+                    `Đã mở khóa kênh ${targetChannel}.`
+                )
+                .addFields(
+                    {
+                        name: "<a:camap:1529737268892274890> Moderator",
+                        value: message.author.tag,
+                        inline: true
+                    },
+                    {
+                        name: "<a:hoatim:1529735587026964491> Kênh",
+                        value: targetChannel.name,
+                        inline: true
+                    }
+                )
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error("[UNLOCK ERROR]", error);
+            const errEmbed = new EmbedBuilder()
+                .setColor("#ff0000")
+                .setTitle("❌ Không thể mở khóa kênh")
+                .setDescription("Đã xảy ra lỗi khi mở khóa kênh này.");
+
+            return message.reply({ embeds: [errEmbed] });
+        }
+    }
+
+    // check av
+    if (command === "av") {
+        const repliedMessage = message.reference ? await message.fetchReference().catch(() => null) : null;
+        const targetUser = repliedMessage ? repliedMessage.author : (message.mentions.users.first() || message.author);
+
+        if (targetUser.bot)
+            return tempReply(message, "❌ Không thể yêu cầu xem avatar của bot!");
+
+        // soi av cua ban than
+        if (targetUser.id === message.author.id) {
+            const fetchedTarget = await targetUser.fetch().catch(() => targetUser);
+            const avatarURL = fetchedTarget.displayAvatarURL({ size: 1024, dynamic: true });
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle(`Avatar của ${fetchedTarget.tag}`)
+                .setImage(avatarURL)
+                .setFooter({
+    text: `Người yêu cầu: @${message.author.username}`,
+    iconURL: message.author.displayAvatarURL({ dynamic: true })
+})
+                .setTimestamp();
+
+            const row = getHavActionRow(fetchedTarget.id);
+
+            return message.reply({ embeds: [embed], components: [row] });
+        }
+
+        // soi av can acp
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setTitle("Yêu cầu xem avatar")
+            .setDescription(`${message.author} muốn xem avatar của bạn. Bạn có đồng ý không?`)
+            .setFooter({ text: `Yêu cầu bởi ${message.author.tag}`, iconURL: message.author.displayAvatarURL({ dynamic: true }) })
+            .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`av_accept_${targetUser.id}_${message.author.id}`)
+                .setLabel("Chấp nhận")
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId(`av_deny_${targetUser.id}_${message.author.id}`)
+                .setLabel("Từ chối")
+                .setStyle(ButtonStyle.Danger)
+        );
+
+        return message.reply({
+            content: `${targetUser}`,
+            embeds: [embed],
+            components: [row]
+        });
+    }
+
+// role, temp role
+else if (command === "role") {
+
+    // ktra quyen ng dung lenh
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Không có quyền")
+            .setDescription(
+                "Bạn không có quyền để sử dụng lệnh này!\n\n" +
+                "📌 Quyền hạn: Quản lý vai trò (Manage Roles)."
+            );
+
+        return message.reply({ embeds: [errEmbed] });
+    }
+
+    const targetMember = message.mentions.members.first();
+
+    let queryArgs = targetMember ? args.slice(1) : [...args];
+
+    if (queryArgs.length === 0) {
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Thiếu thông tin")
+            .setDescription(
+                `Hãy nhập tên role hoặc thời gian!\n\n` +
+                `📌 Ví dụ: \`${prefix}role Cư dân\`\n` +
+                `📌 Ví dụ Temp Role: \`${prefix}role @user Cư dân 10m\``
+            );
+
+        return message.reply({ embeds: [errEmbed] });
+    }
+
+    let durationMs = 0;
+    let timeString = "";
+    const lastArg = queryArgs[queryArgs.length - 1];
+    const timeRegex = /^(\d+)([smhd])$/i;
+    const timeMatch = lastArg.match(timeRegex);
+
+    if (timeMatch) {
+        const value = parseInt(timeMatch[1]);
+        const unit = timeMatch[2].toLowerCase();
+
+        if (unit === 's') durationMs = value * 1000;
+        else if (unit === 'm') durationMs = value * 60 * 1000;
+        else if (unit === 'h') durationMs = value * 60 * 60 * 1000;
+        else if (unit === 'd') durationMs = value * 24 * 60 * 60 * 1000;
+
+        timeString = lastArg;
+        queryArgs.pop();
+    }
+
+    const roleQuery = queryArgs.join(" ").trim();
+
+    if (!roleQuery) {
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Thiếu tên role")
+            .setDescription("Vui lòng nhập tên role cần thêm/gỡ!");
+        return message.reply({ embeds: [errEmbed] });
+    }
+
+    const memberToModify = targetMember || message.member;
+
+    const roleToModify = message.guild.roles.cache.find(
+        role => 
+            role.name.toLowerCase().startsWith(roleQuery.toLowerCase()) || 
+            role.name.toLowerCase().includes(roleQuery.toLowerCase())
+    );
+
+    if (!roleToModify) {
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Không tìm thấy role")
+            .setDescription(`Không tìm thấy role nào phù hợp với **${roleQuery}**!`);
+
+        return message.reply({ embeds: [errEmbed] });
+    }
+
+    const botMember = message.guild.members.me;
+
+    if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Bot thiếu quyền")
+            .setDescription("Bot cần quyền **Manage Roles** để thực hiện lệnh này.");
+
+        return message.reply({ embeds: [errEmbed] });
+    }
+
+    if (roleToModify.id === message.guild.id || roleToModify.managed) {
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Role không hợp lệ")
+            .setDescription("Không thể thêm hoặc gỡ role này.");
+
+        return message.reply({ embeds: [errEmbed] });
+    }
+
+    // phan cap role
+    if (roleToModify.position >= botMember.roles.highest.position) {
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Lỗi phân cấp role")
+            .setDescription("Bot không thể thêm/gỡ role này vì role đó cao hơn hoặc ngang bằng role cao nhất của bot.");
+
+        return message.reply({ embeds: [errEmbed] });
+    }
+
+    try {
+        // co role r thi xoa role
+        if (memberToModify.roles.cache.has(roleToModify.id)) {
+            await memberToModify.roles.remove(roleToModify, `Role removed by ${message.author.tag}`);
+
+            const embed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setTitle("❌ Gỡ Role thành công")
+                .setDescription(`Đã gỡ role ${roleToModify} khỏi ${memberToModify}.`)
+                .addFields(
+                    { name: "<a:camap:1529737268892274890> Moderator", value: message.author.tag, inline: true },
+                    { name: "<a:hoatim:1529735587026964491> Role", value: roleToModify.name, inline: true }
+                )
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+        }
+
+        // chx co role thi them role
+        await memberToModify.roles.add(roleToModify, `Role added by ${message.author.tag}`);
+
+        const embed = new EmbedBuilder()
+            .setColor("#481f86")
+            .setTitle("<a:tikhong:1542901135088812092> Thêm Role thành công")
+            .setDescription(`Đã thêm role ${roleToModify} cho ${memberToModify}.` + (timeString ? `\n⏱️ **Thời hạn:** ${timeString}` : ""))
+            .addFields(
+                { name: "<a:camap:1529737268892274890> Moderator", value: message.author.tag, inline: true },
+                { name: "<a:hoatim:1529735587026964491> Role", value: roleToModify.name, inline: true }
+            )
+            .setTimestamp();
+
+        message.reply({ embeds: [embed] });
+
+// temp role
+        if (durationMs > 0) {
+            setTimeout(async () => {
+                try {
+
+                    const freshMember = await message.guild.members.fetch(memberToModify.id).catch(() => null);
+                    if (freshMember && freshMember.roles.cache.has(roleToModify.id)) {
+                        await freshMember.roles.remove(roleToModify, "Temporary role expired.");
+                        
+                        const expireEmbed = new EmbedBuilder()
+                            .setColor("#481f86")
+                            .setTitle("<a:milk1:1543226643961610352> Hết thời gian Temp Role")
+                            .setDescription(`Đã tự động gỡ role cho thành viên sau thời gian đã định.`)
+                            .addFields(
+                                { name: "<a:hoatim:1529735587026964491> Role", value: roleToModify.name, inline: true },
+                                { name: "<a:camap:1529737268892274890> Thành viên", value: freshMember.user.tag, inline: true },
+                                { name: "<a:milk2:1543226670276808714> Thời hạn", value: timeString, inline: true }
+                            )
+                            .setTimestamp();
+
+                        message.channel.send({ embeds: [expireEmbed] }).catch(() => {});
+                    }
+                } catch (err) {
+                    console.error("[TEMP ROLE EXPIRED ERROR]", err);
+                }
+            }, durationMs);
+        }
+
+    } catch (error) {
+        console.error("[ROLE ERROR]", error);
+        const errEmbed = new EmbedBuilder()
+            .setColor("#ff0000")
+            .setTitle("❌ Lỗi")
+            .setDescription("Đã xảy ra lỗi khi cấp hoặc gỡ role.");
+        return message.reply({ embeds: [errEmbed] });
+    }
+}
+    // help
+    if (command === "help") {
+        const embed = getHomeEmbed(message.guild, client, prefix);
+
+        const row = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId("help_menu")
+                .setPlaceholder("Chọn danh mục")
+                .addOptions([
+                    {
+                        label: "Quản trị (Moderation)",
+                        description: "Các lệnh ban, unban, kick, mute",
+                        value: "help_mod",
+                        emoji: "<a:saodoto:1529738089918890106>"
+                    },
+                    {
+                        label: "Cảnh cáo (Warn)",
+                        description: "Các lệnh warn, hcwarn, hrwarn",
+                        value: "help_warn",
+                        emoji: "<a:saohongto:1529736991598575626>"
+                    },
+                    {
+                        label: "Giveaway",
+                        description: "Lệnh tạo và quản lý giveaway",
+                        value: "help_ga",
+                        emoji: "<a:saotimto:1529563552464244939>"
+                    },
+                    {
+                        label: "User",
+                        description: "Lệnh thuộc user",
+                        value: "help_user",
+                        emoji: "<a:saoxanhto:1529737259518263386>"
+                    }
+                ])
+        );
+
+        return message.reply({ embeds: [embed], components: [row] });
+    }
+
+
+// nut xo ra cua lenh help
+client.on("interactionCreate", async (interaction) => {
+    // select menu help
+    if (interaction.isStringSelectMenu()) {
+        if (interaction.customId === "help_menu") {
+            const selected = interaction.values[0];
+
+            if (selected === "help_mod") {
+                const embed = new EmbedBuilder()
+                    .setColor("#481f86")
+                    .setAuthor({ 
+                        name: interaction.guild.name, 
+                        iconURL: interaction.guild.iconURL({ dynamic: true }) 
+                    })
+                    .setTitle("<a:hoatim:1529735587026964491> Danh sách lệnh Quản trị")
+                    .setDescription(
+                        `### \`${prefix}ban\`\n` +
+                        `* **Mô tả** : Cấm thành viên khỏi server.\n` +
+                        `* **Lệnh** : \`${prefix}ban @user [lý do]\`\n\n` +
+                        `### \`${prefix}unban\`\n` +
+                        `* **Mô tả** : Gỡ cấm thành viên.\n` +
+                        `* **Lệnh** : \`${prefix}unban <ID> [lý do]\`\n\n` +
+                        `### \`${prefix}kick\`\n` +
+                        `* **Mô tả** : Đuổi thành viên khỏi server.\n` +
+                        `* **Lệnh** : \`${prefix}kick @user [lý do]\`\n\n` +
+                        `### \`${prefix}mute\`\n` +
+                        `* **Mô tả** : Hạn chế (timeout) thành viên.\n` +
+                        `* **Lệnh** : \`${prefix}mute @user <phút> [lý do]\``+
+                                                `### \`${prefix}mute\`\n` +
+                        `* **Mô tả** : Quản lý vai trò hàng loạt cho thành viên.\n` +
+                        `* **Lệnh** : \`${prefix}role @user <tên role>\``
+                    )
+                    .setFooter({ text: `Tổng 4 danh mục lệnh`, iconURL: client.user.displayAvatarURL() })
+                    .setTimestamp();
+
+                return interaction.reply({ embeds: [embed], ephemeral: true });
+            }
+
+            if (selected === "help_warn") {
+                const embed = new EmbedBuilder()
+                    .setColor("#481f86")
+                    .setAuthor({ 
+                        name: interaction.guild.name, 
+                        iconURL: interaction.guild.iconURL({ dynamic: true }) 
+                    })
+                    .setTitle("<a:saohongto:1529736991598575626> Danh sách lệnh Cảnh cáo")
+                    .setDescription(
+                        `### \`${prefix}warn\`\n` +
+                        `* **Mô tả** : Cảnh cáo thành viên.\n` +
+                        `* **Lệnh** : \`${prefix}warn @user [lý do]\`\n\n` +
+                        `### \`${prefix}cwarn\`\n` +
+                        `* **Mô tả** : Xem lịch sử cảnh cáo của thành viên.\n` +
+                        `* **Lệnh** : \`${prefix}cwarn [@user]\`\n\n` +
+                        `### \`${prefix}rwarn\`\n` +
+                        `* **Mô tả** : Xóa cảnh cáo của thành viên.\n` +
+                        `* **Lệnh** : \`${prefix}rwarn @user <số thứ tự>\``
+                    )
+                    .setFooter({ text: `Tổng 4 danh mục lệnh`, iconURL: client.user.displayAvatarURL() })
+                    .setTimestamp();
+
+                return interaction.reply({ embeds: [embed], ephemeral: true });
+            }
+
+            if (selected === "help_ga") {
+                const embed = new EmbedBuilder()
+                    .setColor("#481f86")
+                    .setAuthor({ 
+                        name: interaction.guild.name, 
+                        iconURL: interaction.guild.iconURL({ dynamic: true }) 
+                    })
+                    .setTitle("<a:phao:1531654953461088447> Danh sách lệnh Giveaway")
+                    .setDescription(
+                        `### \`${prefix}gastart\`\n` +
+                        `* **Mô tả** : Tạo ra giveaway.\n` +
+                        `* **Lệnh** : \`${prefix}gastart <time> <win> <title>\`\n\n` +
+                        `### \`${prefix}gareroll\`\n` +
+                        `* **Mô tả** : Chọn lại người chiến thắng.\n` +
+                        `* **Lệnh** : \`${prefix}gareroll <message_id>\`\n\n` +
+                        `### \`${prefix}gastop\`\n` +
+                        `* **Mô tả** : Dừng giveaway đang chạy.\n` +
+                        `* **Lệnh** : \`${prefix}gastop <message_id>\``
+                    )
+                    .setFooter({ text: `Tổng 4 danh mục lệnh`, iconURL: client.user.displayAvatarURL() })
+                    .setTimestamp();
+
+                return interaction.reply({ embeds: [embed], ephemeral: true });
+            }
+                        if (selected === "help_user") {
+                const embed = new EmbedBuilder()
+                    .setColor("#481f86")
+                    .setAuthor({ 
+                        name: interaction.guild.name, 
+                        iconURL: interaction.guild.iconURL({ dynamic: true }) 
+                    })
+                    .setTitle("<a:camap:1529737268892274890> Danh sách lệnh User")
+                    .setDescription(
+                        `### \`${prefix}avatar\`\n` +
+                        `* **Mô tả** : Xem avatar của bạn hoặc yêu cầu xem của người khác.\n` +
+                        `* **Lệnh** : \`${prefix}avatar <@user> | ${prefix}av <@user>\`\n\n` 
+                    )
+                    .setFooter({ text: `Tổng 4 danh mục lệnh`, iconURL: client.user.displayAvatarURL() })
+                    .setTimestamp();
+
+                return interaction.reply({ embeds: [embed], ephemeral: true });
+            }
+        }
+        return;
+    }
+
+    // xu ly nut
+    if (interaction.isButton()) {
+        const customId = interaction.customId;
+
+        // acp hoac tu choi xem av
+        if (customId.startsWith("av_accept_") || customId.startsWith("av_deny_")) {
+            const parts = customId.split("_");
+            const action = parts[1]; // accept hoặc deny
+            const targetUserId = parts[2];
+            const requesterId = parts[3];
+
+            if (interaction.user.id !== targetUserId) {
+                return interaction.reply({
+                    content: "❌ Bạn không phải là người được yêu cầu xem avatar nên không thể bấm nút này!",
+                    ephemeral: true
+                });
+            }
+
+            if (action === "accept") {
+                const targetUserObj = await client.users.fetch(targetUserId).catch(() => null);
+                const fetchedTarget = targetUserObj ? await targetUserObj.fetch().catch(() => targetUserObj) : null;
+                const avatarURL = fetchedTarget ? fetchedTarget.displayAvatarURL({ size: 1024, dynamic: true }) : interaction.user.displayAvatarURL({ size: 1024, dynamic: true });
+
+                const acceptedEmbed = new EmbedBuilder()
+                    .setColor("#481f86")
+                    .setAuthor({ name: interaction.guild.name, iconURL: interaction.guild.iconURL({ dynamic: true }) })
+                    .setTitle(`Avatar của ${fetchedTarget ? fetchedTarget.tag : interaction.user.tag}`)
+                    .setImage(avatarURL)
+                    .setDescription(`<a:tikhong:1542901135088812092> Đã chấp nhận yêu cầu xem avatar từ <@${requesterId}>`)
+                    .setFooter({ text: `Được yêu cầu bởi ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL({ dynamic: true }) })
+                    .setTimestamp();
+
+                const row = getHavActionRow(targetUserId);
+
+                return interaction.update({
+                    content: `<@${requesterId}>`,
+                    embeds: [acceptedEmbed],
+                    components: [row]
+                });
+            } else if (action === "deny") {
+                const deniedEmbed = new EmbedBuilder()
+                    .setColor("#ff4d4d")
+                    .setTitle("Yêu cầu xem avatar")
+                    .setDescription(`❌ ${interaction.user} đã **từ chối** yêu cầu xem avatar từ <@${requesterId}>`)
+                    .setTimestamp();
+
+                return interaction.update({
+                    content: `<@${requesterId}>`,
+                    embeds: [deniedEmbed],
+                    components: []
+                });
+            }
+        }
+
+        // nut doi avatar, Banner, Server Avatar, Server Banner
+        if (
+            customId.startsWith("hav_uavatar_") ||
+            customId.startsWith("hav_ubanner_") ||
+            customId.startsWith("hav_savatar_") ||
+            customId.startsWith("hav_sbanner_")
+        ) {
+            const parts = customId.split("_");
+            const type = parts[1]; // useravatar, userbanner, svavatar, svbanner
+            const targetUserId = parts[2];
+
+            const targetUserObj = await client.users.fetch(targetUserId).catch(() => null);
+            const fetchedTarget = targetUserObj ? await targetUserObj.fetch().catch(() => targetUserObj) : null;
+            const guild = interaction.guild;
+            const member = await guild.members.fetch(targetUserId).catch(() => null);
+
+            const newEmbed = new EmbedBuilder()
+                .setColor("#481f86")
+                .setAuthor({ name: guild.name, iconURL: guild.iconURL({ dynamic: true }) })
+                .setFooter({ text: `Yêu cầu bởi ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL({ dynamic: true }) })
+                .setTimestamp();
+
+            if (type === "uavatar") {
+                if (!fetchedTarget) return interaction.reply({ content: "❌ Không tìm thấy thông tin người dùng!", ephemeral: true });
+                newEmbed.setTitle(`Avatar cá nhân của ${fetchedTarget.tag}`);
+                newEmbed.setImage(fetchedTarget.displayAvatarURL({ size: 1024, dynamic: true }));
+            } 
+            else if (type === "ubanner") {
+                if (!fetchedTarget) return interaction.reply({ content: "❌ Không tìm thấy thông tin người dùng!", ephemeral: true });
+                const bannerURL = fetchedTarget.bannerURL({ size: 1024, dynamic: true });
+                if (!bannerURL) {
+                    return interaction.reply({ content: `❌ Người dùng **${fetchedTarget.tag}** không có banner cá nhân!`, ephemeral: true });
+                }
+                newEmbed.setTitle(`Banner cá nhân của ${fetchedTarget.tag}`);
+                newEmbed.setImage(bannerURL);
+            } 
+            else if (type === "savatar") {
+                if (!member) return interaction.reply({ content: "❌ Không tìm thấy thành viên này trong server!", ephemeral: true });
+                const serverAvatar = member.displayAvatarURL({ size: 1024, dynamic: true });
+                newEmbed.setTitle(`Server Avatar của ${member.user.tag}`);
+                newEmbed.setImage(serverAvatar);
+            } 
+            else if (type === "sbanner") {
+                if (!member) return interaction.reply({ content: "❌ Không tìm thấy thành viên này trong server!", ephemeral: true });
+                const serverBanner = member.bannerURL({ size: 1024, dynamic: true });
+                if (!serverBanner) {
+                    return interaction.reply({ content: `❌ Thành viên **${member.user.tag}** không có Server Banner riêng trong server này!`, ephemeral: true });
+                }
+                newEmbed.setTitle(`Server Banner của ${member.user.tag}`);
+                newEmbed.setImage(serverBanner);
+            }
+
+            const row = getHavActionRow(targetUserId);
+            return interaction.update({
+                embeds: [newEmbed],
+                components: [row]
+            });
+        }
+    }
+});
+
+client.login(TOKEN);

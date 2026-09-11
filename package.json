@@ -1,7 +1,7 @@
 {
   "name": "mysterious-bot",
   "version": "1.0.0",
-  "description": "bot cua chau dzai",
+  "description": "bot cua ha dzai",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
